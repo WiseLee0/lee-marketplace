@@ -233,18 +233,54 @@ start_dev_server() {
     if [ -n "$dev_port" ]; then
         local wait_count=0
         while ! lsof -i :"$dev_port" &>/dev/null; do
+            # 检查进程是否已退出（命令本身失败）
+            if ! kill -0 "$DEV_SERVER_PID" 2>/dev/null; then
+                echo ""
+                echo -e "${RED}  [x] Dev server 启动失败${NC}"
+                echo ""
+                echo -e "  可能的原因："
+                echo -e "    1. 命令不正确: ${CYAN}$dev_cmd${NC}"
+                echo -e "    2. 依赖未安装，请先运行 ${CYAN}npm install${NC} 或 ${CYAN}pnpm install${NC}"
+                echo -e "    3. 端口 $dev_port 被其他进程占用"
+                echo -e "       检查: ${CYAN}lsof -i :$dev_port${NC}"
+                echo -e "       释放: ${CYAN}kill \$(lsof -ti :$dev_port)${NC}"
+                echo ""
+                DEV_SERVER_PID=""
+                exit 1
+            fi
             wait_count=$((wait_count + 1))
             if [ "$wait_count" -ge 30 ]; then
-                echo -e "${YELLOW}  [!] Dev server 启动超时（30s），继续执行${NC}"
-                break
+                echo ""
+                echo -e "${RED}  [x] Dev server 启动超时（30s）${NC}"
+                echo ""
+                echo -e "  可能的原因："
+                echo -e "    1. 项目编译时间过长，可尝试增大超时时间"
+                echo -e "    2. 端口 $dev_port 与实际启动端口不一致"
+                echo -e "       请检查 ${CYAN}.claude/figma-impl-config.json${NC} 中的 devServerPort 配置"
+                echo -e "    3. dev server 启动后卡住，请手动运行 ${CYAN}$dev_cmd${NC} 排查"
+                echo ""
+                # 清理已启动的进程
+                kill "$DEV_SERVER_PID" 2>/dev/null || true
+                DEV_SERVER_PID=""
+                exit 1
             fi
             sleep 1
         done
-        if [ "$wait_count" -lt 30 ]; then
-            echo -e "  ${GREEN}Dev server 已启动 (端口 $dev_port)${NC}"
-        fi
+        echo -e "  ${GREEN}Dev server 已启动 (端口 $dev_port)${NC}"
     else
         sleep 3
+        if ! kill -0 "$DEV_SERVER_PID" 2>/dev/null; then
+            echo ""
+            echo -e "${RED}  [x] Dev server 启动失败${NC}"
+            echo ""
+            echo -e "  可能的原因："
+            echo -e "    1. 命令不正确: ${CYAN}$dev_cmd${NC}"
+            echo -e "    2. 依赖未安装，请先运行 ${CYAN}npm install${NC} 或 ${CYAN}pnpm install${NC}"
+            echo -e "  建议在 ${CYAN}.claude/figma-impl-config.json${NC} 中配置 devServerPort 以获得更精确的启动检测"
+            echo ""
+            DEV_SERVER_PID=""
+            exit 1
+        fi
         echo -e "  ${GREEN}Dev server 已启动${NC}"
     fi
 }
