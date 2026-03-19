@@ -55,9 +55,9 @@ on_exit() {
     if [ -n "${TIMEOUT_PID:-}" ] && kill -0 "$TIMEOUT_PID" 2>/dev/null; then
         kill "$TIMEOUT_PID" 2>/dev/null || true
     fi
-    # 终止正在运行的 claude 进程（发送 TERM 给进程组）
+    # 终止正在运行的 claude 进程
     if [ -n "$CLAUDE_PID" ] && kill -0 "$CLAUDE_PID" 2>/dev/null; then
-        kill -- -"$CLAUDE_PID" 2>/dev/null || kill "$CLAUDE_PID" 2>/dev/null || true
+        kill "$CLAUDE_PID" 2>/dev/null || true
         wait "$CLAUDE_PID" 2>/dev/null || true
     fi
     # 确保 dev server 被关闭
@@ -78,12 +78,15 @@ on_exit() {
 
 on_signal() {
     INTERRUPTED=true
-    # 立即终止子进程，不等待
+    # 立即终止所有子进程
     if [ -n "${TIMEOUT_PID:-}" ] && kill -0 "$TIMEOUT_PID" 2>/dev/null; then
         kill "$TIMEOUT_PID" 2>/dev/null || true
     fi
     if [ -n "$CLAUDE_PID" ] && kill -0 "$CLAUDE_PID" 2>/dev/null; then
-        kill -- -"$CLAUDE_PID" 2>/dev/null || kill "$CLAUDE_PID" 2>/dev/null || true
+        kill "$CLAUDE_PID" 2>/dev/null || true
+        # 等一小会儿，不行就 SIGKILL
+        sleep 0.5 2>/dev/null || true
+        kill -0 "$CLAUDE_PID" 2>/dev/null && kill -9 "$CLAUDE_PID" 2>/dev/null || true
     fi
     exit 130
 }
@@ -122,7 +125,7 @@ check_prerequisites() {
 
     if [ ! -f "$TASKS_FILE" ]; then
         echo -e "${RED}  [x] 未找到任务文件 .claude/figma-tasks.json${NC}"
-        echo -e "      请先在 Claude Code 中运行 ${CYAN}/figma-impl:figma-impl-plan${NC} 创建任务列表"
+        echo -e "      请先在 Claude Code 中运行 ${CYAN}/figma-impl-plan${NC} 创建任务列表"
         errors=$((errors + 1))
     elif ! validate_json "$TASKS_FILE"; then
         errors=$((errors + 1))
@@ -130,7 +133,7 @@ check_prerequisites() {
 
     if [ ! -f "$CONFIG_FILE" ]; then
         echo -e "${RED}  [x] 未找到配置文件 .claude/figma-impl-config.json${NC}"
-        echo -e "      请先在 Claude Code 中运行 ${CYAN}/figma-impl:figma-impl-plan${NC} 初始化项目"
+        echo -e "      请先在 Claude Code 中运行 ${CYAN}/figma-impl-plan${NC} 初始化项目"
         errors=$((errors + 1))
     elif ! validate_json "$CONFIG_FILE"; then
         errors=$((errors + 1))
@@ -578,7 +581,10 @@ Dev Server URL: ${DEV_URL}
 1. 读取 .claude/figma-impl-config.json 获取配置
 2. 读取 .claude/figma-tasks.json 获取任务列表
 3. 读取 .claude/figma-progress.md 获取历史上下文
-4. git log --oneline -20 了解最近变更
+4. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范、技术栈约定和编码风格要求
+5. 读取 .claude/rules/figma-design-system.md 和 .claude/figma-design-rules.md（如果存在），了解设计系统规则
+6. 查找并读取 Figma 官方 implement-design skill：用 Glob 搜索 ~/.claude/plugins/cache/**/figma/*/skills/implement-design/SKILL.md，如果找到则读取，作为设计稿实现的最佳实践参考
+7. git log --oneline -20 了解最近变更
 
 ### Step 2: 选择任务
 找到名为「${NEXT_TASK}」的任务，将其 status 更新为 in_progress，立即写入 figma-tasks.json。
@@ -620,6 +626,9 @@ Dev Server URL: ${DEV_URL}
 3. 如果 retryCount < ${MAX_RETRIES}: 针对性修复 → 重新验证 → 循环
 4. 如果 retryCount >= ${MAX_RETRIES}: status=\"failed\", lastError=\"差异描述\", 输出 ===TASK_FAILED===
 
+## 注意事项
+- 不修改任务定义：只能修改 status、verifyPassed、retryCount、lastError、files、completedAt 字段，不要改 name、figmaUrl 等定义字段
+
 ## 退出信号（必须输出其中之一）
 - ===TASK_COMPLETE=== 任务成功
 - ===TASK_FAILED=== 任务失败
@@ -629,9 +638,10 @@ Dev Server URL: ${DEV_URL}
     OUTPUT_FILE=$(mktemp)
     SECONDS=0
 
+    # 用进程替换确保 $! 拿到的是 claude 的 PID（而非 tee）
     claude --dangerously-skip-permissions \
         -p "$PROMPT" \
-        2>&1 | tee "$OUTPUT_FILE" &
+        > >(tee "$OUTPUT_FILE") 2>&1 &
     CLAUDE_PID=$!
 
     # macOS 没有 timeout 命令，用后台监控实现超时
@@ -643,7 +653,7 @@ Dev Server URL: ${DEV_URL}
     ) &
     TIMEOUT_PID=$!
 
-    wait "$CLAUDE_PID" 2>/dev/null
+    wait "$CLAUDE_PID" 2>/dev/null || true
     EXIT_CODE=$?
     CLAUDE_PID=""
     if [ -n "$TIMEOUT_PID" ] && kill -0 "$TIMEOUT_PID" 2>/dev/null; then
