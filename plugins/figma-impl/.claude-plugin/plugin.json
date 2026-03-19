@@ -1,7 +1,7 @@
 {
   "name": "figma-impl",
   "description": "从 Figma 设计稿批量实现 React 组件，自动创建任务列表、通过 Figma MCP 实现代码，并借助 Chrome DevTools MCP 进行像素级视觉验证。",
-  "version": "0.1.2",
+  "version": "1.0.3",
   "author": {
     "name": "qidian"
   }
