@@ -48,11 +48,16 @@ CONFIG_FILE="$CLAUDE_DIR/figma-impl-config.json"
 INTERRUPTED=false
 CLAUDE_PID=""
 DEV_SERVER_PID=""
+TIMEOUT_PID=""
 
 on_exit() {
-    # 终止正在运行的 claude 进程
+    # 终止超时监控进程
+    if [ -n "${TIMEOUT_PID:-}" ] && kill -0 "$TIMEOUT_PID" 2>/dev/null; then
+        kill "$TIMEOUT_PID" 2>/dev/null || true
+    fi
+    # 终止正在运行的 claude 进程（发送 TERM 给进程组）
     if [ -n "$CLAUDE_PID" ] && kill -0 "$CLAUDE_PID" 2>/dev/null; then
-        kill "$CLAUDE_PID" 2>/dev/null || true
+        kill -- -"$CLAUDE_PID" 2>/dev/null || kill "$CLAUDE_PID" 2>/dev/null || true
         wait "$CLAUDE_PID" 2>/dev/null || true
     fi
     # 确保 dev server 被关闭
@@ -73,6 +78,13 @@ on_exit() {
 
 on_signal() {
     INTERRUPTED=true
+    # 立即终止子进程，不等待
+    if [ -n "${TIMEOUT_PID:-}" ] && kill -0 "$TIMEOUT_PID" 2>/dev/null; then
+        kill "$TIMEOUT_PID" 2>/dev/null || true
+    fi
+    if [ -n "$CLAUDE_PID" ] && kill -0 "$CLAUDE_PID" 2>/dev/null; then
+        kill -- -"$CLAUDE_PID" 2>/dev/null || kill "$CLAUDE_PID" 2>/dev/null || true
+    fi
     exit 130
 }
 
@@ -213,8 +225,8 @@ start_dev_server() {
     fi
 
     echo -e "  ${CYAN}启动 dev server: $dev_cmd${NC}"
-    # 在独立进程组中启动，便于 cleanup 时整组终止
-    setsid $dev_cmd &>/dev/null &
+    # 后台启动 dev server
+    $dev_cmd &>/dev/null &
     DEV_SERVER_PID=$!
 
     # 等待 dev server 启动
@@ -240,21 +252,20 @@ start_dev_server() {
 stop_dev_server() {
     if [ -n "$DEV_SERVER_PID" ] && kill -0 "$DEV_SERVER_PID" 2>/dev/null; then
         echo -e "  ${DIM}关闭 dev server (PID: $DEV_SERVER_PID)${NC}"
-        # 杀掉整个进程组（npm/pnpm 会 spawn 子进程）
-        kill -- -"$DEV_SERVER_PID" 2>/dev/null || kill "$DEV_SERVER_PID" 2>/dev/null || true
+        kill "$DEV_SERVER_PID" 2>/dev/null || true
         wait "$DEV_SERVER_PID" 2>/dev/null || true
-        # 如果端口仍被占用，强制清理残留进程
-        local dev_port
-        dev_port=$(jq -r '.devServerPort // ""' "$CONFIG_FILE" 2>/dev/null)
-        if [ -n "$dev_port" ]; then
-            local remaining_pids
-            remaining_pids=$(lsof -ti :"$dev_port" 2>/dev/null || true)
-            if [ -n "$remaining_pids" ]; then
-                echo -e "  ${DIM}清理端口 $dev_port 上的残留进程${NC}"
-                echo "$remaining_pids" | xargs kill 2>/dev/null || true
-            fi
+    fi
+    DEV_SERVER_PID=""
+    # 按端口清理残留进程（npm/pnpm 会 spawn 子进程）
+    local dev_port
+    dev_port=$(jq -r '.devServerPort // ""' "$CONFIG_FILE" 2>/dev/null || true)
+    if [ -n "$dev_port" ]; then
+        local remaining_pids
+        remaining_pids=$(lsof -ti :"$dev_port" 2>/dev/null || true)
+        if [ -n "$remaining_pids" ]; then
+            echo -e "  ${DIM}清理端口 $dev_port 上的残留进程${NC}"
+            echo "$remaining_pids" | xargs kill 2>/dev/null || true
         fi
-        DEV_SERVER_PID=""
     fi
 }
 
@@ -599,8 +610,11 @@ Dev Server URL: ${DEV_URL}
     wait "$CLAUDE_PID" 2>/dev/null
     EXIT_CODE=$?
     CLAUDE_PID=""
-    kill "$TIMEOUT_PID" 2>/dev/null
-    wait "$TIMEOUT_PID" 2>/dev/null
+    if [ -n "$TIMEOUT_PID" ] && kill -0 "$TIMEOUT_PID" 2>/dev/null; then
+        kill "$TIMEOUT_PID" 2>/dev/null || true
+        wait "$TIMEOUT_PID" 2>/dev/null || true
+    fi
+    TIMEOUT_PID=""
     ELAPSED=$SECONDS
 
     $INTERRUPTED && { rm -f "$OUTPUT_FILE"; break; }
