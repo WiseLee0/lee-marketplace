@@ -46,7 +46,6 @@ chmod +x ./run-figma-impl.sh
   "devServerUrl": "",
   "devServerPort": "",
   "screenshotWaitMs": 3000,
-  "techStack": "react",
   "viewportWidth": 1440,
   "viewportHeight": 900,
   "sessionTimeout": 600
@@ -60,8 +59,7 @@ chmod +x ./run-figma-impl.sh
 1. **devServerCommand** — 开发服务器启动命令（如 `npm run dev`、`pnpm dev`）
 2. **devServerUrl** — 开发服务器地址（如 `http://localhost:3000`）
 3. **devServerPort** — 端口号（如 `3000`）
-4. **techStack** — 技术栈（如 `react`、`vue`、`nextjs`）
-5. **maxRetries** — 失败重试上限（默认 5）
+4. **maxRetries** — 失败重试上限（默认 5）
 6. **viewportWidth / viewportHeight** — Chrome 截图视口尺寸（默认 1440x900，一般无需修改）
 7. **sessionTimeout** — 单个任务的最大执行时间，单位秒（默认 600）
 

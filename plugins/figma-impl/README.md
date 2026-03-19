@@ -87,7 +87,6 @@ Harness 脚本会：
   "devServerUrl": "http://localhost:3000",
   "devServerPort": "3000",
   "screenshotWaitMs": 3000,
-  "techStack": "react",
   "viewportWidth": 1440,
   "viewportHeight": 900,
   "sessionTimeout": 600
@@ -101,7 +100,6 @@ Harness 脚本会：
 | `devServerUrl` | 开发服务器 URL，用于 Chrome 导航 | `""` |
 | `devServerPort` | 开发服务器端口 | `""` |
 | `screenshotWaitMs` | 截图前等待时间（毫秒） | `3000` |
-| `techStack` | 项目技术栈 | `"react"` |
 | `viewportWidth` | Chrome 截图视口宽度 | `1440` |
 | `viewportHeight` | Chrome 截图视口高度 | `900` |
 | `sessionTimeout` | 单个任务最大执行时间（秒） | `600` |

@@ -49,26 +49,35 @@ INTERRUPTED=false
 CLAUDE_PID=""
 DEV_SERVER_PID=""
 
-cleanup() {
-    INTERRUPTED=true
-    echo ""
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}  执行已中断 (Ctrl+C)${NC}"
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    echo -e "  当前进度已保存。你可以："
-    echo -e "    ${CYAN}./run-figma-impl.sh${NC}          继续执行"
-    echo -e "    ${CYAN}./run-figma-impl.sh --status${NC}  查看状态"
-    echo ""
+on_exit() {
+    # 终止正在运行的 claude 进程
     if [ -n "$CLAUDE_PID" ] && kill -0 "$CLAUDE_PID" 2>/dev/null; then
         kill "$CLAUDE_PID" 2>/dev/null || true
         wait "$CLAUDE_PID" 2>/dev/null || true
     fi
+    # 确保 dev server 被关闭
     stop_dev_server
+    # 用户中断时显示提示信息
+    if $INTERRUPTED; then
+        echo ""
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${YELLOW}  执行已中断 (Ctrl+C)${NC}"
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo -e "  当前进度已保存。你可以："
+        echo -e "    ${CYAN}./run-figma-impl.sh${NC}          继续执行"
+        echo -e "    ${CYAN}./run-figma-impl.sh --status${NC}  查看状态"
+        echo ""
+    fi
+}
+
+on_signal() {
+    INTERRUPTED=true
     exit 130
 }
 
-trap cleanup SIGINT SIGTERM
+trap on_exit EXIT
+trap on_signal SIGINT SIGTERM SIGHUP
 
 # ============================================================
 # 工具函数
@@ -204,7 +213,8 @@ start_dev_server() {
     fi
 
     echo -e "  ${CYAN}启动 dev server: $dev_cmd${NC}"
-    $dev_cmd &>/dev/null &
+    # 在独立进程组中启动，便于 cleanup 时整组终止
+    setsid $dev_cmd &>/dev/null &
     DEV_SERVER_PID=$!
 
     # 等待 dev server 启动
@@ -230,8 +240,20 @@ start_dev_server() {
 stop_dev_server() {
     if [ -n "$DEV_SERVER_PID" ] && kill -0 "$DEV_SERVER_PID" 2>/dev/null; then
         echo -e "  ${DIM}关闭 dev server (PID: $DEV_SERVER_PID)${NC}"
-        kill "$DEV_SERVER_PID" 2>/dev/null || true
+        # 杀掉整个进程组（npm/pnpm 会 spawn 子进程）
+        kill -- -"$DEV_SERVER_PID" 2>/dev/null || kill "$DEV_SERVER_PID" 2>/dev/null || true
         wait "$DEV_SERVER_PID" 2>/dev/null || true
+        # 如果端口仍被占用，强制清理残留进程
+        local dev_port
+        dev_port=$(jq -r '.devServerPort // ""' "$CONFIG_FILE" 2>/dev/null)
+        if [ -n "$dev_port" ]; then
+            local remaining_pids
+            remaining_pids=$(lsof -ti :"$dev_port" 2>/dev/null || true)
+            if [ -n "$remaining_pids" ]; then
+                echo -e "  ${DIM}清理端口 $dev_port 上的残留进程${NC}"
+                echo "$remaining_pids" | xargs kill 2>/dev/null || true
+            fi
+        fi
         DEV_SERVER_PID=""
     fi
 }
@@ -560,14 +582,25 @@ Dev Server URL: ${DEV_URL}
     OUTPUT_FILE=$(mktemp)
     SECONDS=0
 
-    timeout "$SESSION_TIMEOUT" claude --dangerously-skip-permissions \
+    claude --dangerously-skip-permissions \
         -p "$PROMPT" \
         2>&1 | tee "$OUTPUT_FILE" &
     CLAUDE_PID=$!
 
+    # macOS 没有 timeout 命令，用后台监控实现超时
+    (
+      sleep "$SESSION_TIMEOUT" 2>/dev/null
+      if kill -0 "$CLAUDE_PID" 2>/dev/null; then
+        kill "$CLAUDE_PID" 2>/dev/null
+      fi
+    ) &
+    TIMEOUT_PID=$!
+
     wait "$CLAUDE_PID" 2>/dev/null
     EXIT_CODE=$?
     CLAUDE_PID=""
+    kill "$TIMEOUT_PID" 2>/dev/null
+    wait "$TIMEOUT_PID" 2>/dev/null
     ELAPSED=$SECONDS
 
     $INTERRUPTED && { rm -f "$OUTPUT_FILE"; break; }
@@ -622,9 +655,6 @@ Dev Server URL: ${DEV_URL}
         sleep 3
     fi
 done
-
-# 关闭 dev server
-stop_dev_server
 
 if ! $INTERRUPTED; then
     echo ""

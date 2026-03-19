@@ -65,7 +65,6 @@ user-invocable: true
   "devServerUrl": "",
   "devServerPort": "",
   "screenshotWaitMs": 3000,
-  "techStack": "react",
   "viewportWidth": 1440,
   "viewportHeight": 900,
   "sessionTimeout": 600
