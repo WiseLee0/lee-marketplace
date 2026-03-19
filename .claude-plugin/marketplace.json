@@ -1,0 +1,17 @@
+{
+  "name": "lee-marketplace",
+  "owner": {
+    "name": "qidian"
+  },
+  "metadata": {
+    "description": "插件合集",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "figma-impl",
+      "source": "./plugins/figma-impl",
+      "description": "从 Figma 设计稿批量实现 React 组件，自动视觉验证"
+    }
+  ]
+}
