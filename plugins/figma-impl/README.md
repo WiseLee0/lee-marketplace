@@ -35,7 +35,7 @@ claude plugin install figma@claude-plugins-official
 ### 第一步：初始化环境
 
 ```
-/figma-impl:figma-impl-setup
+/figma-impl-init
 ```
 
 这会将 harness 脚本复制到项目根目录并创建配置文件，过程中会询问你的开发服务器信息。
@@ -43,7 +43,7 @@ claude plugin install figma@claude-plugins-official
 ### 第二步：创建任务
 
 ```
-/figma-impl:figma-impl
+/figma-impl-plan
 功能1: 导航栏组件, figma设计稿: https://figma.com/design/abc123/MyApp?node-id=1-2
 功能2: 用户头像, figma设计稿: https://figma.com/design/abc123/MyApp?node-id=3-4
 功能3: 登录页面, figma设计稿: https://figma.com/design/abc123/MyApp?node-id=5-6

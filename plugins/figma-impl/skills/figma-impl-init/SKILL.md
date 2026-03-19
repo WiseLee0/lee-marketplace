@@ -1,8 +1,8 @@
 ---
-name: figma-impl-setup
+name: figma-impl-init
 description: |
   初始化 figma-impl 插件环境。将 harness 脚本复制到项目根目录，创建默认配置文件。
-  触发场景：用户说 "setup figma-impl"、"初始化 figma-impl"、"安装 figma-impl 脚本"。
+  触发场景：用户说"figma-impl init"、"setup figma-impl"、"初始化 figma-impl"、"安装 figma-impl 脚本"、提到 figma-impl-init。
 user-invocable: true
 ---
 
@@ -73,6 +73,6 @@ figma-impl 环境初始化完成！
   .claude/figma-impl-config.json   — 配置文件
 
 下一步:
-  1. 在 Claude Code 中运行 /figma-impl:figma-impl 创建任务列表
+  1. 在 Claude Code 中运行 /figma-impl-plan 创建任务列表
   2. 运行 ./run-figma-impl.sh 开始自动执行
 ```

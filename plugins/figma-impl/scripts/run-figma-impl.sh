@@ -110,7 +110,7 @@ check_prerequisites() {
 
     if [ ! -f "$TASKS_FILE" ]; then
         echo -e "${RED}  [x] 未找到任务文件 .claude/figma-tasks.json${NC}"
-        echo -e "      请先在 Claude Code 中运行 ${CYAN}/figma-impl:figma-impl${NC} 创建任务列表"
+        echo -e "      请先在 Claude Code 中运行 ${CYAN}/figma-impl:figma-impl-plan${NC} 创建任务列表"
         errors=$((errors + 1))
     elif ! validate_json "$TASKS_FILE"; then
         errors=$((errors + 1))
@@ -118,7 +118,7 @@ check_prerequisites() {
 
     if [ ! -f "$CONFIG_FILE" ]; then
         echo -e "${RED}  [x] 未找到配置文件 .claude/figma-impl-config.json${NC}"
-        echo -e "      请先在 Claude Code 中运行 ${CYAN}/figma-impl:figma-impl${NC} 初始化项目"
+        echo -e "      请先在 Claude Code 中运行 ${CYAN}/figma-impl:figma-impl-plan${NC} 初始化项目"
         errors=$((errors + 1))
     elif ! validate_json "$CONFIG_FILE"; then
         errors=$((errors + 1))

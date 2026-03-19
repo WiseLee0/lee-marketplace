@@ -1,8 +1,8 @@
 ---
-name: figma-impl
+name: figma-impl-plan
 description: |
-  批量实现 Figma 设计稿功能。输入功能列表+Figma URL，自动创建任务、分析依赖、逐个实现代码、Chrome DevTools 视觉验证，完美还原才通过。
-  触发场景：用户要批量实现 Figma 设计稿、输入 "功能N: xxx, figma设计稿: url" 格式、提到 figma-impl。
+  批量实现 Figma 设计稿功能。输入功能列表+Figma URL，自动创建任务、逐个实现代码、Chrome DevTools 视觉验证，完美还原才通过。
+  触发场景：用户要批量实现 Figma 设计稿、输入 "功能N: xxx, figma设计稿: url" 格式、提到 figma-impl-plan。
 user-invocable: true
 ---
 
@@ -51,8 +51,9 @@ user-invocable: true
 #### 2.1 获取 Figma 设计信息
 
 对每个功能调用 Figma MCP：
-- 调用 `figma__get_design_context` 获取设计上下文（组件结构、使用的设计系统组件等）
+
 - 调用 `figma__get_screenshot` 获取设计截图，理解实际设计内容
+- 不需要调用 `figma__get_design_context` 获取设计上下文
 
 #### 2.2 扫描项目现有代码
 
@@ -71,7 +72,6 @@ user-invocable: true
 | **粒度拆分** | 如果一个功能过于复杂，拆分为多个子任务 | "登录页面" → "LoginForm 表单组件" + "LoginPage 登录页面" |
 | **粒度合并** | 如果多个功能其实是同一组件的不同状态，合并它们 | "主要按钮" + "次要按钮" → "Button 按钮组件（含 primary/secondary 变体）" |
 | **遗漏补充** | 识别出用户遗漏但设计稿中存在的子组件 | 设计稿中用到了自定义 Icon，但用户未列出 → 建议添加 |
-| **实现路径** | 标注组件的目标文件路径 | `src/components/UserAvatar/index.tsx` |
 
 #### 2.4 生成优化后的任务列表并确认
 
@@ -80,15 +80,14 @@ user-invocable: true
 ```
 📋 优化后的任务列表：
 
-| # | 原始输入 | 优化后名称 | 优化说明 | 目标路径 |
-|---|---------|-----------|---------|---------|
-| 1 | 用户头像组件 | UserAvatar 头像组件（含状态指示器） | 从设计稿识别出包含在线/离线状态 | src/components/UserAvatar/ |
-| 2 | 登录页面 | LoginForm 表单组件 | 拆分：先实现表单组件 | src/components/LoginForm/ |
-| 3 | (新增) | LoginPage 登录页面 | 拆分：再组装页面，依赖 #1 #2 | src/app/login/ |
+| # | 原始输入 | 优化后名称 | 优化说明 |
+|---|---------|-----------|---------|
+| 1 | 用户头像组件 | UserAvatar 头像组件（含状态指示器） | 从设计稿识别出包含在线/离线状态 |
+| 2 | 登录页面 | LoginForm 表单组件 | 拆分：先实现表单组件 |
+| 3 | (新增) | LoginPage 登录页面 | 拆分：再组装页面 |
 
 ⚠️ 变更说明：
 - 任务 "登录页面" 已拆分为表单组件(#2)和页面(#3)
-- 新增任务 #3，因为登录页面依赖 UserAvatar 和 LoginForm
 ```
 
 **必须等待用户确认后才能继续。** 用户可以：
@@ -96,19 +95,7 @@ user-invocable: true
 - 修改：调整某些任务的名称、描述或拆分方式
 - 拒绝优化：使用原始输入继续
 
-### 3. 分析依赖关系
-
-根据功能描述和常识自动分析任务间的依赖关系：
-- 基础组件（按钮、输入框、头像等）应该排在前面
-- 页面级功能依赖其使用的子组件
-- 无依赖的任务可以独立执行
-
-**循环依赖检测**：分析完依赖关系后，必须检查是否存在循环依赖（A→B→C→A）。检测方法：
-1. 对每个任务执行深度优先遍历其 dependsOn 链
-2. 如果在遍历中遇到已访问的节点，说明存在循环
-3. 如果检测到循环依赖，向用户报告涉及的任务，并要求用户手动调整依赖关系后再继续
-
-### 4. 读取配置
+### 3. 读取配置
 
 读取 `.claude/figma-impl-config.json`，如果不存在则创建默认配置：
 
@@ -127,7 +114,7 @@ user-invocable: true
 
 **重要**：`devServerCommand`、`devServerUrl`、`devServerPort` 必须由用户提供。如果配置中为空，询问用户并写入配置文件。
 
-### 5. 创建任务文件
+### 4. 创建任务文件
 
 创建 `.claude/figma-tasks.json`：
 
@@ -142,7 +129,6 @@ user-invocable: true
     "figmaUrl": "完整URL",
     "figmaFileKey": "xxx",
     "figmaNodeId": "1:2",
-    "dependsOn": [],
     "status": "pending",
     "verifyPassed": false,
     "retryCount": 0,
@@ -153,7 +139,7 @@ user-invocable: true
 ]
 ```
 
-### 6. 创建进度文件
+### 5. 创建进度文件
 
 创建 `.claude/figma-progress.md`：
 
@@ -169,7 +155,7 @@ user-invocable: true
 （每轮执行后追加）
 ```
 
-### 7. 安装 harness 脚本
+### 6. 安装 harness 脚本
 
 将 harness 脚本复制到项目根目录：
 
@@ -180,9 +166,9 @@ chmod +x ./run-figma-impl.sh
 
 如果 `${CLAUDE_PLUGIN_ROOT}` 不可用，则直接告知用户从插件目录手动复制，或提供脚本内容让用户自行创建。
 
-### 8. 初始化完成
+### 7. 初始化完成
 
-输出任务列表概览和依赖关系图，告知用户：
+输出任务列表概览，告知用户：
 - 运行 `./run-figma-impl.sh` 开始自动执行
 - 或使用 `./run-figma-impl.sh --dry-run` 预览执行计划
 - 或使用 `./run-figma-impl.sh --status` 查看任务状态
@@ -205,7 +191,7 @@ chmod +x ./run-figma-impl.sh
 
 按以下优先级选择任务：
 1. 状态为 `in_progress` 的任务（上一轮未完成的，继续执行）
-2. 状态为 `pending` 且所有 `dependsOn` 的任务已 `done` 的任务
+2. 状态为 `pending` 的任务（按 ID 顺序）
 3. 如果所有任务都是 `done` 或 `failed`，输出 `===ALL_DONE===` 并退出
 
 选择任务后，将其 `status` 更新为 `in_progress`，立即写入 `figma-tasks.json`。
@@ -297,7 +283,7 @@ chmod +x ./run-figma-impl.sh
 - `===TASK_COMPLETE===` — 任务成功完成
 - `===TASK_FAILED===` — 任务失败（超过重试上限）
 - `===ALL_DONE===` — 所有任务已处理完毕
-- `===NO_TASK===` — 没有可执行的任务（依赖阻塞）
+- `===NO_TASK===` — 没有可执行的任务
 
 ---
 
