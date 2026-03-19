@@ -387,6 +387,43 @@ reset_failed_tasks() {
         "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
 }
 
+# 运行一次 Claude 会话，返回输出文件路径
+# 用法: run_claude_session "prompt" output_var elapsed_var exit_code_var
+run_claude_session() {
+    local prompt="$1"
+    local _output_file
+    _output_file=$(mktemp)
+    SECONDS=0
+
+    claude --dangerously-skip-permissions \
+        -p "$prompt" \
+        > >(tee "$_output_file") 2>&1 &
+    CLAUDE_PID=$!
+
+    (
+      sleep "$SESSION_TIMEOUT" 2>/dev/null
+      if kill -0 "$CLAUDE_PID" 2>/dev/null; then
+        kill "$CLAUDE_PID" 2>/dev/null
+      fi
+    ) &
+    TIMEOUT_PID=$!
+
+    wait "$CLAUDE_PID" 2>/dev/null || true
+    local _exit_code=$?
+    CLAUDE_PID=""
+    if [ -n "$TIMEOUT_PID" ] && kill -0 "$TIMEOUT_PID" 2>/dev/null; then
+        kill "$TIMEOUT_PID" 2>/dev/null || true
+        wait "$TIMEOUT_PID" 2>/dev/null || true
+    fi
+    TIMEOUT_PID=""
+    local _elapsed=$SECONDS
+
+    # 通过全局变量返回结果
+    RCS_OUTPUT_FILE="$_output_file"
+    RCS_ELAPSED=$_elapsed
+    RCS_EXIT_CODE=$_exit_code
+}
+
 # ============================================================
 # 启动前状态检查 — 交互式菜单
 # ============================================================
@@ -568,9 +605,11 @@ while has_remaining_tasks; do
     MAX_RETRIES=$(jq -r '.maxRetries // 5' "$CONFIG_FILE")
     SCREENSHOT_WAIT=$(jq -r '.screenshotWaitMs // 3000' "$CONFIG_FILE")
     DEV_URL=$(jq -r '.devServerUrl // ""' "$CONFIG_FILE")
+    VERIFY_THRESHOLD=$(jq -r '.verifyThreshold // 85' "$CONFIG_FILE")
 
-    # 构建 prompt — 完整内联执行规范（因为 harness 模式下 Claude 无法访问插件 SKILL.md）
-    PROMPT="你现在处于 figma-impl 的 harness 执行阶段，负责实现一个 Figma 设计稿功能。
+    # ── Prompt A: 实现 ──────────────────────────────────────
+    IMPL_PROMPT="你现在处于 figma-impl 的 harness 执行阶段，负责实现一个 Figma 设计稿功能。
+你只需要完成代码实现，不需要做视觉验证（验证由独立会话完成）。
 
 当前任务: ${NEXT_TASK}
 Dev Server URL: ${DEV_URL}
@@ -602,83 +641,123 @@ Dev Server URL: ${DEV_URL}
 4. 确保代码可编译运行，无 TypeScript/ESLint 错误
 5. 如果 Figma 返回了 Code Connect 映射，优先使用对应的已有组件
 
-### Step 5: 视觉验证（关键步骤）
+### Step 5: 完成
+1. 确认代码已编写完成、可编译
+2. 输出 ===IMPL_DONE===
+
+## 注意事项
+- 不修改任务定义：只能修改 status 字段（设为 in_progress），不要改 name、figmaUrl 等定义字段
+- 不要做视觉验证、不要截图对比、不要修改 verifyPassed 或 retryCount
+- 不要 git commit（由 harness 在验证通过后统一处理）
+
+## 退出信号（必须输出其中之一）
+- ===IMPL_DONE=== 实现完成
+- ===NO_TASK=== 无可执行任务"
+
+    # ── Prompt B: 独立验证 ──────────────────────────────────
+    VERIFY_PROMPT="你是一个严格的视觉 QA 审查员。你的工作是对比 Figma 设计稿和实际实现的截图，找出所有差异。
+你不是实现者，你没有写这些代码，你对它没有感情。你的目标是找出问题，而不是找理由通过。
+
+⚠️ 审查原则：
+- 宁可误判为不通过，也不要放过差异
+- 不要为实现者找借口（如「细微差异可以接受」「整体还原度不错」）
+- 每个维度独立评分，不因其他维度表现好而放宽某个维度的标准
+- 如果某个元素在设计稿中存在但实现中缺失，该维度直接 0 分
+
+当前任务: ${NEXT_TASK}
+Dev Server URL: ${DEV_URL}
+通过阈值: 每项 ≥ 7 分且总分 ≥ ${VERIFY_THRESHOLD}%
+
+## 执行步骤
+
+### Step 1: 获取 Figma 设计基准
+1. 读取 .claude/figma-tasks.json 获取当前任务信息（figmaUrl 中的 fileKey 和 nodeId）
+2. 调用 Figma MCP 的 figma__get_screenshot，传入 fileKey 和 nodeId，获取设计稿截图
+
+### Step 2: 截取实现截图
 1. Dev server 已由 harness 脚本启动，无需你再启动
 2. 使用 Chrome DevTools MCP 的 resize_page 设置视口为 ${VIEWPORT_W} x ${VIEWPORT_H}
 3. 使用 Chrome DevTools MCP 的 navigate_page 导航到目标页面（type=\"url\", url=目标URL）
 4. 等待页面完全加载（等待 ${SCREENSHOT_WAIT} 毫秒，可用 wait_for 等待关键文本出现）
 5. 使用 Chrome DevTools MCP 的 take_screenshot 截取当前实现的截图
-6. 将实际截图与 Step 3 获取的 Figma 设计稿截图逐项对比
 
-对比检查清单：布局结构、间距(padding/margin/gap)、颜色(背景/文字/边框)、字体(字号/字重/行高)、圆角、阴影、图标/图片、响应式表现
+### Step 3: 逐项对比评分
+对以下每个维度独立打分（0-10 分），并列出具体差异：
 
-### Step 6: 判定与处理
-**验证通过：**
-1. 更新 figma-tasks.json: status=\"done\", verifyPassed=true, completedAt=当前时间（原子写入）
-2. 记录实现涉及的文件列表到 files 字段
-3. git add 相关文件 && git commit -m \"feat: 实现[功能名称] - Figma设计稿还原\"
-4. 在 figma-progress.md 追加本轮执行日志
-5. 输出 ===TASK_COMPLETE===
+| 维度 | 评分标准 |
+|------|---------|
+| layout | 整体布局结构是否一致（flex/grid方向、嵌套层级、元素排列顺序） |
+| spacing | padding/margin/gap 是否匹配（允许 ±2px 误差） |
+| colors | 背景色、文字色、边框色、渐变是否匹配 |
+| typography | 字号、字重、行高、字体是否匹配 |
+| borders | 圆角、边框宽度、边框样式是否匹配 |
+| shadows | 阴影是否匹配（包括无阴影 vs 有阴影） |
+| icons_images | 图标/图片是否存在、尺寸是否正确、位置是否正确 |
+| completeness | 设计稿中所有元素是否都已实现（无遗漏） |
 
-**验证未通过：**
-1. 详细分析差异点
-2. retryCount += 1，立即原子写入 figma-tasks.json
-3. 如果 retryCount < ${MAX_RETRIES}: 针对性修复 → 重新验证 → 循环
-4. 如果 retryCount >= ${MAX_RETRIES}: status=\"failed\", lastError=\"差异描述\", 输出 ===TASK_FAILED===
+### Step 4: 输出结果
+你必须在输出中包含以下格式的 JSON 块（用 ===VERIFY_RESULT_START=== 和 ===VERIFY_RESULT_END=== 包裹）：
 
-## 注意事项
-- 不修改任务定义：只能修改 status、verifyPassed、retryCount、lastError、files、completedAt 字段，不要改 name、figmaUrl 等定义字段
+===VERIFY_RESULT_START===
+{
+  \"passed\": false,
+  \"scores\": {
+    \"layout\": 8,
+    \"spacing\": 6,
+    \"colors\": 9,
+    \"typography\": 7,
+    \"borders\": 8,
+    \"shadows\": 10,
+    \"icons_images\": 5,
+    \"completeness\": 7
+  },
+  \"total_score\": 75,
+  \"failed_dimensions\": [\"spacing\", \"icons_images\"],
+  \"differences\": [
+    \"间距: 卡片之间的 gap 设计稿为 16px，实现为 24px\",
+    \"图标: 右上角的关闭按钮图标缺失\",
+    \"颜色: 标题文字色设计稿为 #1A1A1A，实现为 #333333\"
+  ]
+}
+===VERIFY_RESULT_END===
 
-## 退出信号（必须输出其中之一）
-- ===TASK_COMPLETE=== 任务成功
-- ===TASK_FAILED=== 任务失败
-- ===ALL_DONE=== 所有任务完毕
-- ===NO_TASK=== 无可执行任务"
+评分规则：
+- total_score = 所有维度分数之和 / (维度数 × 10) × 100，四舍五入取整
+- passed = true 当且仅当：total_score >= ${VERIFY_THRESHOLD} 且所有维度 >= 7
+- failed_dimensions: 列出所有 < 7 分的维度
+- differences: 列出所有具体差异，格式为「维度: 具体描述」
 
-    OUTPUT_FILE=$(mktemp)
-    SECONDS=0
+## 退出信号
+- ===VERIFY_DONE=== 验证完成（无论通过与否）"
 
-    # 用进程替换确保 $! 拿到的是 claude 的 PID（而非 tee）
-    claude --dangerously-skip-permissions \
-        -p "$PROMPT" \
-        > >(tee "$OUTPUT_FILE") 2>&1 &
-    CLAUDE_PID=$!
+    # ── Prompt C: 修复（重试时使用）──────────────────────────
+    # FIX_PROMPT 在验证失败时动态生成，注入差异描述
 
-    # macOS 没有 timeout 命令，用后台监控实现超时
-    (
-      sleep "$SESSION_TIMEOUT" 2>/dev/null
-      if kill -0 "$CLAUDE_PID" 2>/dev/null; then
-        kill "$CLAUDE_PID" 2>/dev/null
-      fi
-    ) &
-    TIMEOUT_PID=$!
+    # ================================================================
+    # 阶段 1: 实现代码
+    # ================================================================
+    echo -e "  ${CYAN}[实现阶段]${NC} 启动 Claude 实现会话..."
 
-    wait "$CLAUDE_PID" 2>/dev/null || true
-    EXIT_CODE=$?
-    CLAUDE_PID=""
-    if [ -n "$TIMEOUT_PID" ] && kill -0 "$TIMEOUT_PID" 2>/dev/null; then
-        kill "$TIMEOUT_PID" 2>/dev/null || true
-        wait "$TIMEOUT_PID" 2>/dev/null || true
-    fi
-    TIMEOUT_PID=""
-    ELAPSED=$SECONDS
+    run_claude_session "$IMPL_PROMPT"
+    IMPL_OUTPUT="$RCS_OUTPUT_FILE"
+    IMPL_ELAPSED=$RCS_ELAPSED
+    IMPL_EXIT_CODE=$RCS_EXIT_CODE
 
-    $INTERRUPTED && { rm -f "$OUTPUT_FILE"; break; }
+    $INTERRUPTED && { rm -f "$IMPL_OUTPUT"; break; }
 
     # 格式化耗时
-    if [ "$ELAPSED" -ge 60 ]; then
-        ELAPSED_STR="$((ELAPSED / 60))m$((ELAPSED % 60))s"
+    if [ "$IMPL_ELAPSED" -ge 60 ]; then
+        IMPL_ELAPSED_STR="$((IMPL_ELAPSED / 60))m$((IMPL_ELAPSED % 60))s"
     else
-        ELAPSED_STR="${ELAPSED}s"
+        IMPL_ELAPSED_STR="${IMPL_ELAPSED}s"
     fi
 
-    # 超时检测
-    if [ "$EXIT_CODE" -eq 124 ]; then
-        echo -e "${RED}  -> 超时: $NEXT_TASK (${SESSION_TIMEOUT}s 上限)  耗时: ${ELAPSED_STR}${NC}"
-        # 将 in_progress 任务标记为 failed
-        jq 'map(if .status == "in_progress" then .status = "failed" | .lastError = "会话超时" else . end)' \
+    # 实现阶段超时检测
+    if [ "$IMPL_EXIT_CODE" -eq 124 ]; then
+        echo -e "${RED}  -> 实现超时: $NEXT_TASK (${SESSION_TIMEOUT}s 上限)  耗时: ${IMPL_ELAPSED_STR}${NC}"
+        jq 'map(if .status == "in_progress" then .status = "failed" | .lastError = "实现会话超时" else . end)' \
             "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
-        rm -f "$OUTPUT_FILE"
+        rm -f "$IMPL_OUTPUT"
         if has_remaining_tasks && ! $INTERRUPTED; then
             echo -e "${DIM}  3s 后开始下一轮...${NC}"
             sleep 3
@@ -686,28 +765,196 @@ Dev Server URL: ${DEV_URL}
         continue
     fi
 
-    # 解析结果
-    if grep -q "===ALL_DONE===" "$OUTPUT_FILE"; then
-        echo ""
-        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${GREEN}  所有任务已完成！${NC}"
-        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        rm -f "$OUTPUT_FILE"
-        print_status
-        break
-    elif grep -q "===TASK_COMPLETE===" "$OUTPUT_FILE"; then
-        echo -e "${GREEN}  -> 完成: $NEXT_TASK  耗时: ${ELAPSED_STR}${NC}"
-    elif grep -q "===TASK_FAILED===" "$OUTPUT_FILE"; then
-        echo -e "${RED}  -> 失败: $NEXT_TASK (达到重试上限)  耗时: ${ELAPSED_STR}${NC}"
-    elif grep -q "===NO_TASK===" "$OUTPUT_FILE"; then
+    # 检查实现结果
+    if grep -q "===NO_TASK===" "$IMPL_OUTPUT"; then
         echo -e "${YELLOW}  -> 无可执行任务（依赖阻塞）${NC}"
-        rm -f "$OUTPUT_FILE"
+        rm -f "$IMPL_OUTPUT"
         break
-    else
-        echo -e "${YELLOW}  -> 未检测到状态标记，可能执行异常  耗时: ${ELAPSED_STR}${NC}"
     fi
 
-    rm -f "$OUTPUT_FILE"
+    if ! grep -q "===IMPL_DONE===" "$IMPL_OUTPUT"; then
+        echo -e "${YELLOW}  -> 实现阶段未正常结束  耗时: ${IMPL_ELAPSED_STR}${NC}"
+        rm -f "$IMPL_OUTPUT"
+        # 标记失败，继续下一个任务
+        jq 'map(if .status == "in_progress" then .status = "failed" | .lastError = "实现阶段异常退出" else . end)' \
+            "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+        if has_remaining_tasks && ! $INTERRUPTED; then
+            echo -e "${DIM}  3s 后开始下一轮...${NC}"
+            sleep 3
+        fi
+        continue
+    fi
+
+    echo -e "${GREEN}  -> 实现完成  耗时: ${IMPL_ELAPSED_STR}${NC}"
+    rm -f "$IMPL_OUTPUT"
+
+    # ================================================================
+    # 阶段 2: 验证循环（harness 控制重试）
+    # ================================================================
+    RETRY_COUNT=0
+    TASK_PASSED=false
+    TOTAL_VERIFY_ELAPSED=0
+    LAST_DIFFERENCES=""
+
+    while [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; do
+        $INTERRUPTED && break
+
+        if [ "$RETRY_COUNT" -eq 0 ]; then
+            echo -e "  ${CYAN}[验证阶段]${NC} 启动独立验证会话..."
+        else
+            echo -e "  ${CYAN}[验证阶段]${NC} 第 ${RETRY_COUNT} 次修复后重新验证..."
+        fi
+
+        # 运行验证会话
+        run_claude_session "$VERIFY_PROMPT"
+        VERIFY_OUTPUT="$RCS_OUTPUT_FILE"
+        VERIFY_ELAPSED=$RCS_ELAPSED
+        TOTAL_VERIFY_ELAPSED=$((TOTAL_VERIFY_ELAPSED + VERIFY_ELAPSED))
+
+        $INTERRUPTED && { rm -f "$VERIFY_OUTPUT"; break; }
+
+        # 验证超时
+        if [ "$RCS_EXIT_CODE" -eq 124 ]; then
+            echo -e "${RED}  -> 验证超时  ${NC}"
+            rm -f "$VERIFY_OUTPUT"
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            # 更新 retryCount 到 JSON
+            jq --argjson rc "$RETRY_COUNT" \
+                'map(if .status == "in_progress" then .retryCount = $rc else . end)' \
+                "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+            continue
+        fi
+
+        # 提取验证结果 JSON
+        VERIFY_JSON=""
+        if grep -q "===VERIFY_RESULT_START===" "$VERIFY_OUTPUT"; then
+            VERIFY_JSON=$(sed -n '/===VERIFY_RESULT_START===/,/===VERIFY_RESULT_END===/p' "$VERIFY_OUTPUT" \
+                | grep -v '===VERIFY_RESULT' \
+                | tr -d '\r')
+        fi
+
+        if [ -z "$VERIFY_JSON" ] || ! echo "$VERIFY_JSON" | jq empty 2>/dev/null; then
+            echo -e "${YELLOW}  -> 验证结果解析失败，视为未通过${NC}"
+            VERIFY_PASSED=false
+            LAST_DIFFERENCES="验证结果 JSON 解析失败"
+        else
+            VERIFY_PASSED=$(echo "$VERIFY_JSON" | jq -r '.passed')
+            TOTAL_SCORE=$(echo "$VERIFY_JSON" | jq -r '.total_score')
+            FAILED_DIMS=$(echo "$VERIFY_JSON" | jq -r '.failed_dimensions | join(", ")')
+            LAST_DIFFERENCES=$(echo "$VERIFY_JSON" | jq -r '.differences | join("\n")')
+
+            # 打印评分详情
+            echo -e "  ${BOLD}验证评分:${NC}"
+            echo "$VERIFY_JSON" | jq -r '.scores | to_entries[] | "    \(.key): \(.value)/10"'
+            echo -e "    ${BOLD}总分: ${TOTAL_SCORE}%${NC} (阈值: ${VERIFY_THRESHOLD}%)"
+            if [ -n "$FAILED_DIMS" ] && [ "$FAILED_DIMS" != "" ]; then
+                echo -e "    ${RED}未达标维度: ${FAILED_DIMS}${NC}"
+            fi
+        fi
+
+        rm -f "$VERIFY_OUTPUT"
+
+        # 判定结果
+        if [ "$VERIFY_PASSED" = "true" ]; then
+            TASK_PASSED=true
+            break
+        fi
+
+        # 未通过：递增 retryCount
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+        jq --argjson rc "$RETRY_COUNT" \
+            'map(if .status == "in_progress" then .retryCount = $rc else . end)' \
+            "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+        echo -e "  ${YELLOW}验证未通过 (retry ${RETRY_COUNT}/${MAX_RETRIES})${NC}"
+
+        if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
+            break
+        fi
+
+        # 生成修复 prompt，注入差异描述
+        echo -e "  ${CYAN}[修复阶段]${NC} 启动修复会话..."
+        FIX_PROMPT="你现在处于 figma-impl 的 harness 执行阶段，需要修复一个 Figma 设计稿实现的视觉差异。
+独立的视觉 QA 审查员已经检查了你的实现，发现以下问题：
+
+当前任务: ${NEXT_TASK}
+Dev Server URL: ${DEV_URL}
+当前重试次数: ${RETRY_COUNT}/${MAX_RETRIES}
+
+## QA 审查员发现的差异
+
+${LAST_DIFFERENCES}
+
+## 执行步骤
+
+### Step 1: 理解问题
+1. 读取 .claude/figma-tasks.json 获取当前任务信息
+2. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范
+3. 调用 Figma MCP 的 figma__get_design_context，传入 fileKey 和 nodeId，重新获取设计上下文
+4. 调用 Figma MCP 的 figma__get_screenshot，传入 fileKey 和 nodeId，获取设计稿截图
+5. 仔细阅读上面列出的每一个差异点
+
+### Step 2: 针对性修复
+针对上述每个差异点逐一修复代码。注意：
+- 只修复上面列出的问题，不要做无关改动
+- 确保修复不会引入新的视觉差异
+- 确保代码可编译运行
+
+### Step 3: 完成
+输出 ===FIX_DONE===
+
+## 退出信号
+- ===FIX_DONE=== 修复完成"
+
+        run_claude_session "$FIX_PROMPT"
+        FIX_OUTPUT="$RCS_OUTPUT_FILE"
+        FIX_ELAPSED=$RCS_ELAPSED
+        TOTAL_VERIFY_ELAPSED=$((TOTAL_VERIFY_ELAPSED + FIX_ELAPSED))
+
+        $INTERRUPTED && { rm -f "$FIX_OUTPUT"; break; }
+
+        if [ "$RCS_EXIT_CODE" -eq 124 ]; then
+            echo -e "${RED}  -> 修复超时${NC}"
+        elif grep -q "===FIX_DONE===" "$FIX_OUTPUT"; then
+            echo -e "${GREEN}  -> 修复完成${NC}"
+        else
+            echo -e "${YELLOW}  -> 修复阶段未正常结束${NC}"
+        fi
+        rm -f "$FIX_OUTPUT"
+
+    done  # end verify/fix loop
+
+    $INTERRUPTED && break
+
+    # 格式化总耗时
+    TOTAL_ELAPSED=$((IMPL_ELAPSED + TOTAL_VERIFY_ELAPSED))
+    if [ "$TOTAL_ELAPSED" -ge 60 ]; then
+        TOTAL_ELAPSED_STR="$((TOTAL_ELAPSED / 60))m$((TOTAL_ELAPSED % 60))s"
+    else
+        TOTAL_ELAPSED_STR="${TOTAL_ELAPSED}s"
+    fi
+
+    # 最终判定
+    if [ "$TASK_PASSED" = true ]; then
+        # 验证通过：更新状态 + git commit
+        jq 'map(if .status == "in_progress" then .status = "done" | .verifyPassed = true | .completedAt = (now | strftime("%Y-%m-%dT%H:%M:%SZ")) else . end)' \
+            "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+        # git commit（提交所有变更，含 figma-tasks.json 的状态更新）
+        if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+            git add -A && git commit -m "feat: 实现 ${NEXT_TASK} - Figma设计稿还原" 2>/dev/null || true
+        fi
+
+        echo -e "${GREEN}  -> 完成: $NEXT_TASK  耗时: ${TOTAL_ELAPSED_STR}  重试: ${RETRY_COUNT}${NC}"
+    else
+        # 验证失败：标记 failed
+        ESCAPED_DIFF=$(echo "$LAST_DIFFERENCES" | head -c 500 | jq -Rs .)
+        jq --argjson rc "$RETRY_COUNT" --argjson err "$ESCAPED_DIFF" \
+            'map(if .status == "in_progress" then .status = "failed" | .retryCount = $rc | .lastError = $err else . end)' \
+            "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+        echo -e "${RED}  -> 失败: $NEXT_TASK (验证未通过, 重试 ${RETRY_COUNT}/${MAX_RETRIES})  耗时: ${TOTAL_ELAPSED_STR}${NC}"
+    fi
 
     # 短暂暂停
     if has_remaining_tasks && ! $INTERRUPTED; then
