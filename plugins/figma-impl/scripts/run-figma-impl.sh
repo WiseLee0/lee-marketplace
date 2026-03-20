@@ -41,6 +41,9 @@ CLAUDE_DIR="$PROJECT_DIR/.claude"
 TASKS_FILE="$CLAUDE_DIR/figma-tasks.json"
 PROGRESS_FILE="$CLAUDE_DIR/figma-progress.md"
 CONFIG_FILE="$CLAUDE_DIR/figma-impl-config.json"
+IMPL_RESULT_FILE="$CLAUDE_DIR/impl-result.json"
+VERIFY_RESULT_FILE="$CLAUDE_DIR/verify-result.json"
+FIX_RESULT_FILE="$CLAUDE_DIR/fix-result.json"
 
 # ============================================================
 # 中断处理
@@ -233,6 +236,8 @@ start_dev_server() {
     DEV_SERVER_PID=$!
 
     # 等待 dev server 启动
+    local start_timeout
+    start_timeout=$(jq -r '.devServerStartTimeout // 120' "$CONFIG_FILE")
     if [ -n "$dev_port" ]; then
         local wait_count=0
         while ! lsof -i :"$dev_port" &>/dev/null; do
@@ -252,24 +257,29 @@ start_dev_server() {
                 exit 1
             fi
             wait_count=$((wait_count + 1))
-            if [ "$wait_count" -ge 30 ]; then
+            if [ "$wait_count" -ge "$start_timeout" ]; then
                 echo ""
-                echo -e "${RED}  [x] Dev server 启动超时（30s）${NC}"
+                echo -e "${RED}  [x] Dev server 启动超时（${start_timeout}s）${NC}"
                 echo ""
                 echo -e "  可能的原因："
                 echo -e "    1. 项目编译时间过长，可尝试增大超时时间"
                 echo -e "    2. 端口 $dev_port 与实际启动端口不一致"
                 echo -e "       请检查 ${CYAN}.claude/figma-impl-config.json${NC} 中的 devServerPort 配置"
                 echo -e "    3. dev server 启动后卡住，请手动运行 ${CYAN}$dev_cmd${NC} 排查"
+                echo -e "    4. 可在 .claude/figma-impl-config.json 中设置 ${CYAN}devServerStartTimeout${NC} 增大超时（默认 120s）"
                 echo ""
                 # 清理已启动的进程
                 kill "$DEV_SERVER_PID" 2>/dev/null || true
                 DEV_SERVER_PID=""
                 exit 1
             fi
+            # 每 10 秒打印一次等待进度
+            if [ $((wait_count % 10)) -eq 0 ] && [ "$wait_count" -gt 0 ]; then
+                echo -e "  ${DIM}等待 dev server 启动... (${wait_count}/${start_timeout}s)${NC}"
+            fi
             sleep 1
         done
-        echo -e "  ${GREEN}Dev server 已启动 (端口 $dev_port)${NC}"
+        echo -e "  ${GREEN}Dev server 已启动 (端口 $dev_port, 耗时 ${wait_count}s)${NC}"
     else
         sleep 3
         if ! kill -0 "$DEV_SERVER_PID" 2>/dev/null; then
@@ -387,17 +397,16 @@ reset_failed_tasks() {
         "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
 }
 
-# 运行一次 Claude 会话，返回输出文件路径
-# 用法: run_claude_session "prompt" output_var elapsed_var exit_code_var
+# 运行一次 Claude 会话
+# 用法: run_claude_session "prompt"
+# 结果通过全局变量返回: RCS_ELAPSED, RCS_EXIT_CODE
 run_claude_session() {
     local prompt="$1"
-    local _output_file
-    _output_file=$(mktemp)
     SECONDS=0
 
     claude --dangerously-skip-permissions \
         -p "$prompt" \
-        > >(tee "$_output_file") 2>&1 &
+        2>&1 &
     CLAUDE_PID=$!
 
     (
@@ -416,11 +425,8 @@ run_claude_session() {
         wait "$TIMEOUT_PID" 2>/dev/null || true
     fi
     TIMEOUT_PID=""
-    local _elapsed=$SECONDS
 
-    # 通过全局变量返回结果
-    RCS_OUTPUT_FILE="$_output_file"
-    RCS_ELAPSED=$_elapsed
+    RCS_ELAPSED=$SECONDS
     RCS_EXIT_CODE=$_exit_code
 }
 
@@ -592,6 +598,9 @@ while has_remaining_tasks; do
         break
     fi
 
+    # 每轮开始前清理上一轮的结果文件
+    rm -f "$IMPL_RESULT_FILE" "$VERIFY_RESULT_FILE" "$FIX_RESULT_FILE"
+
     echo ""
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BLUE}  Round $ROUND | $NEXT_TASK  ${DIM}($DONE_COUNT/$TOTAL done)${NC}"
@@ -641,18 +650,16 @@ Dev Server URL: ${DEV_URL}
 4. 确保代码可编译运行，无 TypeScript/ESLint 错误
 5. 如果 Figma 返回了 Code Connect 映射，优先使用对应的已有组件
 
-### Step 5: 完成
-1. 确认代码已编写完成、可编译
-2. 输出 ===IMPL_DONE===
+### Step 5: 写入结果
+确认代码已编写完成、可编译后，将结果写入 .claude/impl-result.json：
+- 实现完成：写入 {\"status\": \"done\"}
+- 无可执行任务：写入 {\"status\": \"no_task\"}
 
 ## 注意事项
 - 不修改任务定义：只能修改 status 字段（设为 in_progress），不要改 name、figmaUrl 等定义字段
 - 不要做视觉验证、不要截图对比、不要修改 verifyPassed 或 retryCount
 - 不要 git commit（由 harness 在验证通过后统一处理）
-
-## 退出信号（必须输出其中之一）
-- ===IMPL_DONE=== 实现完成
-- ===NO_TASK=== 无可执行任务"
+- 必须将结果写入 .claude/impl-result.json，harness 通过该文件判断会话结果"
 
     # ── Prompt B: 独立验证 ──────────────────────────────────
     VERIFY_PROMPT="你是一个严格的视觉 QA 审查员。你的工作是对比 Figma 设计稿和实际实现的截图，找出所有差异。
@@ -695,10 +702,9 @@ Dev Server URL: ${DEV_URL}
 | icons_images | 图标/图片是否存在、尺寸是否正确、位置是否正确 |
 | completeness | 设计稿中所有元素是否都已实现（无遗漏） |
 
-### Step 4: 输出结果
-你必须在输出中包含以下格式的 JSON 块（用 ===VERIFY_RESULT_START=== 和 ===VERIFY_RESULT_END=== 包裹）：
+### Step 4: 写入结果
+将验证结果写入 .claude/verify-result.json（harness 通过该文件读取评分），格式如下：
 
-===VERIFY_RESULT_START===
 {
   \"passed\": false,
   \"scores\": {
@@ -719,16 +725,13 @@ Dev Server URL: ${DEV_URL}
     \"颜色: 标题文字色设计稿为 #1A1A1A，实现为 #333333\"
   ]
 }
-===VERIFY_RESULT_END===
 
 评分规则：
 - total_score = 所有维度分数之和 / (维度数 × 10) × 100，四舍五入取整
 - passed = true 当且仅当：total_score >= ${VERIFY_THRESHOLD} 且所有维度 >= 7
 - failed_dimensions: 列出所有 < 7 分的维度
 - differences: 列出所有具体差异，格式为「维度: 具体描述」
-
-## 退出信号
-- ===VERIFY_DONE=== 验证完成（无论通过与否）"
+- 必须将结果写入 .claude/verify-result.json，这是唯一的结果传递方式"
 
     # ── Prompt C: 修复（重试时使用）──────────────────────────
     # FIX_PROMPT 在验证失败时动态生成，注入差异描述
@@ -739,11 +742,9 @@ Dev Server URL: ${DEV_URL}
     echo -e "  ${CYAN}[实现阶段]${NC} 启动 Claude 实现会话..."
 
     run_claude_session "$IMPL_PROMPT"
-    IMPL_OUTPUT="$RCS_OUTPUT_FILE"
     IMPL_ELAPSED=$RCS_ELAPSED
-    IMPL_EXIT_CODE=$RCS_EXIT_CODE
 
-    $INTERRUPTED && { rm -f "$IMPL_OUTPUT"; break; }
+    $INTERRUPTED && break
 
     # 格式化耗时
     if [ "$IMPL_ELAPSED" -ge 60 ]; then
@@ -753,11 +754,10 @@ Dev Server URL: ${DEV_URL}
     fi
 
     # 实现阶段超时检测
-    if [ "$IMPL_EXIT_CODE" -eq 124 ]; then
+    if [ "$RCS_EXIT_CODE" -eq 124 ]; then
         echo -e "${RED}  -> 实现超时: $NEXT_TASK (${SESSION_TIMEOUT}s 上限)  耗时: ${IMPL_ELAPSED_STR}${NC}"
         jq 'map(if .status == "in_progress" then .status = "failed" | .lastError = "实现会话超时" else . end)' \
             "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
-        rm -f "$IMPL_OUTPUT"
         if has_remaining_tasks && ! $INTERRUPTED; then
             echo -e "${DIM}  3s 后开始下一轮...${NC}"
             sleep 3
@@ -765,17 +765,19 @@ Dev Server URL: ${DEV_URL}
         continue
     fi
 
-    # 检查实现结果
-    if grep -q "===NO_TASK===" "$IMPL_OUTPUT"; then
+    # 读取结果文件判断实现状态
+    IMPL_STATUS=""
+    if [ -f "$IMPL_RESULT_FILE" ] && jq empty "$IMPL_RESULT_FILE" 2>/dev/null; then
+        IMPL_STATUS=$(jq -r '.status // ""' "$IMPL_RESULT_FILE")
+    fi
+
+    if [ "$IMPL_STATUS" = "no_task" ]; then
         echo -e "${YELLOW}  -> 无可执行任务（依赖阻塞）${NC}"
-        rm -f "$IMPL_OUTPUT"
         break
     fi
 
-    if ! grep -q "===IMPL_DONE===" "$IMPL_OUTPUT"; then
+    if [ "$IMPL_STATUS" != "done" ]; then
         echo -e "${YELLOW}  -> 实现阶段未正常结束  耗时: ${IMPL_ELAPSED_STR}${NC}"
-        rm -f "$IMPL_OUTPUT"
-        # 标记失败，继续下一个任务
         jq 'map(if .status == "in_progress" then .status = "failed" | .lastError = "实现阶段异常退出" else . end)' \
             "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
         if has_remaining_tasks && ! $INTERRUPTED; then
@@ -786,7 +788,6 @@ Dev Server URL: ${DEV_URL}
     fi
 
     echo -e "${GREEN}  -> 实现完成  耗时: ${IMPL_ELAPSED_STR}${NC}"
-    rm -f "$IMPL_OUTPUT"
 
     # ================================================================
     # 阶段 2: 验证循环（harness 控制重试）
@@ -805,54 +806,43 @@ Dev Server URL: ${DEV_URL}
             echo -e "  ${CYAN}[验证阶段]${NC} 第 ${RETRY_COUNT} 次修复后重新验证..."
         fi
 
-        # 运行验证会话
+        # 运行验证会话（每次验证前清理旧结果）
+        rm -f "$VERIFY_RESULT_FILE"
         run_claude_session "$VERIFY_PROMPT"
-        VERIFY_OUTPUT="$RCS_OUTPUT_FILE"
         VERIFY_ELAPSED=$RCS_ELAPSED
         TOTAL_VERIFY_ELAPSED=$((TOTAL_VERIFY_ELAPSED + VERIFY_ELAPSED))
 
-        $INTERRUPTED && { rm -f "$VERIFY_OUTPUT"; break; }
+        $INTERRUPTED && break
 
         # 验证超时
         if [ "$RCS_EXIT_CODE" -eq 124 ]; then
             echo -e "${RED}  -> 验证超时  ${NC}"
-            rm -f "$VERIFY_OUTPUT"
             RETRY_COUNT=$((RETRY_COUNT + 1))
-            # 更新 retryCount 到 JSON
             jq --argjson rc "$RETRY_COUNT" \
                 'map(if .status == "in_progress" then .retryCount = $rc else . end)' \
                 "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
             continue
         fi
 
-        # 提取验证结果 JSON
-        VERIFY_JSON=""
-        if grep -q "===VERIFY_RESULT_START===" "$VERIFY_OUTPUT"; then
-            VERIFY_JSON=$(sed -n '/===VERIFY_RESULT_START===/,/===VERIFY_RESULT_END===/p' "$VERIFY_OUTPUT" \
-                | grep -v '===VERIFY_RESULT' \
-                | tr -d '\r')
-        fi
-
-        if [ -z "$VERIFY_JSON" ] || ! echo "$VERIFY_JSON" | jq empty 2>/dev/null; then
-            echo -e "${YELLOW}  -> 验证结果解析失败，视为未通过${NC}"
-            VERIFY_PASSED=false
-            LAST_DIFFERENCES="验证结果 JSON 解析失败"
-        else
-            VERIFY_PASSED=$(echo "$VERIFY_JSON" | jq -r '.passed')
-            TOTAL_SCORE=$(echo "$VERIFY_JSON" | jq -r '.total_score')
-            FAILED_DIMS=$(echo "$VERIFY_JSON" | jq -r '.failed_dimensions | join(", ")')
-            LAST_DIFFERENCES=$(echo "$VERIFY_JSON" | jq -r '.differences | join("\n")')
+        # 从结果文件读取验证 JSON
+        if [ -f "$VERIFY_RESULT_FILE" ] && jq empty "$VERIFY_RESULT_FILE" 2>/dev/null; then
+            VERIFY_PASSED=$(jq -r '.passed' "$VERIFY_RESULT_FILE")
+            TOTAL_SCORE=$(jq -r '.total_score' "$VERIFY_RESULT_FILE")
+            FAILED_DIMS=$(jq -r '.failed_dimensions | join(", ")' "$VERIFY_RESULT_FILE")
+            LAST_DIFFERENCES=$(jq -r '.differences | join("\n")' "$VERIFY_RESULT_FILE")
 
             # 打印评分详情
             echo -e "  ${BOLD}验证评分:${NC}"
-            echo "$VERIFY_JSON" | jq -r '.scores | to_entries[] | "    \(.key): \(.value)/10"'
+            jq -r '.scores | to_entries[] | "    \(.key): \(.value)/10"' "$VERIFY_RESULT_FILE"
             echo -e "    ${BOLD}总分: ${TOTAL_SCORE}%${NC} (阈值: ${VERIFY_THRESHOLD}%)"
             if [ -n "$FAILED_DIMS" ] && [ "$FAILED_DIMS" != "" ]; then
                 echo -e "    ${RED}未达标维度: ${FAILED_DIMS}${NC}"
             fi
+        else
+            echo -e "${YELLOW}  -> 验证结果文件不存在或解析失败，视为未通过${NC}"
+            VERIFY_PASSED=false
+            LAST_DIFFERENCES="验证结果文件不存在或解析失败"
         fi
-
-        rm -f "$VERIFY_OUTPUT"
 
         # 判定结果
         if [ "$VERIFY_PASSED" = "true" ]; then
@@ -900,27 +890,24 @@ ${LAST_DIFFERENCES}
 - 确保修复不会引入新的视觉差异
 - 确保代码可编译运行
 
-### Step 3: 完成
-输出 ===FIX_DONE===
+### Step 3: 写入结果
+修复完成后，将结果写入 .claude/fix-result.json：
+- 写入 {\"status\": \"done\"}"
 
-## 退出信号
-- ===FIX_DONE=== 修复完成"
-
+        rm -f "$FIX_RESULT_FILE"
         run_claude_session "$FIX_PROMPT"
-        FIX_OUTPUT="$RCS_OUTPUT_FILE"
         FIX_ELAPSED=$RCS_ELAPSED
         TOTAL_VERIFY_ELAPSED=$((TOTAL_VERIFY_ELAPSED + FIX_ELAPSED))
 
-        $INTERRUPTED && { rm -f "$FIX_OUTPUT"; break; }
+        $INTERRUPTED && break
 
         if [ "$RCS_EXIT_CODE" -eq 124 ]; then
             echo -e "${RED}  -> 修复超时${NC}"
-        elif grep -q "===FIX_DONE===" "$FIX_OUTPUT"; then
+        elif [ -f "$FIX_RESULT_FILE" ] && [ "$(jq -r '.status // ""' "$FIX_RESULT_FILE" 2>/dev/null)" = "done" ]; then
             echo -e "${GREEN}  -> 修复完成${NC}"
         else
             echo -e "${YELLOW}  -> 修复阶段未正常结束${NC}"
         fi
-        rm -f "$FIX_OUTPUT"
 
     done  # end verify/fix loop
 
