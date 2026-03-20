@@ -34,13 +34,17 @@ user-invocable: true
 ```
 功能1: 用户头像组件, figma设计稿: https://figma.com/design/xxx?node-id=1-2
 功能2: 登录页面, figma设计稿: https://figma.com/design/xxx?node-id=3-4
+功能3: 用户登录 API 对接
+功能4: 全局状态管理
 ```
 
 从中提取每个功能的：
 - `name`: 功能名称
-- `figmaUrl`: Figma 设计稿完整 URL
-- `figmaFileKey`: 从 URL 提取的 fileKey
-- `figmaNodeId`: 从 URL 提取的 nodeId（将 `-` 转换为 `:`）
+- `figmaUrl`: Figma 设计稿完整 URL（纯逻辑任务留空 `""`）
+- `figmaFileKey`: 从 URL 提取的 fileKey（纯逻辑任务留空 `""`）
+- `figmaNodeId`: 从 URL 提取的 nodeId，将 `-` 转换为 `:`（纯逻辑任务留空 `""`）
+
+**注意**：没有 `figma设计稿:` 的功能视为纯逻辑任务，`description` 字段需要写清楚功能需求，因为 harness 会用代码审查替代视觉验证。
 
 ### 2. 智能分析与优化任务列表
 
@@ -106,6 +110,7 @@ user-invocable: true
   "viewportWidth": 1440,
   "viewportHeight": 900,
   "verifyThreshold": 85,
+  "reviewThreshold": 80,
   "sessionTimeout": 600
 }
 ```
@@ -124,9 +129,10 @@ user-invocable: true
     "originalName": "用户原始输入的名称",
     "description": "AI 根据 Figma 设计稿分析后生成的详细描述",
     "targetPath": "src/components/Example/index.tsx",
-    "figmaUrl": "完整URL",
+    "figmaUrl": "完整URL（纯逻辑任务留空）",
     "figmaFileKey": "xxx",
     "figmaNodeId": "1:2",
+    "dependsOn": [],
     "status": "pending",
     "verifyPassed": false,
     "retryCount": 0,
@@ -136,6 +142,11 @@ user-invocable: true
   }
 ]
 ```
+
+**任务类型说明：**
+- **设计稿任务**：`figmaUrl` 非空，harness 会执行 Figma 设计稿实现 → 视觉验证 → 修复循环
+- **纯逻辑任务**：`figmaUrl` 为空字符串 `""`，harness 会执行逻辑实现 → 代码审查 → 修复循环（审查维度为 correctness、completeness、error_handling、code_quality、type_safety、integration）
+- `dependsOn`：可选，整数数组，表示依赖的其他任务 ID，harness 会按依赖顺序调度
 
 ### 5. 创建进度文件
 

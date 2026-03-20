@@ -44,6 +44,8 @@ CONFIG_FILE="$CLAUDE_DIR/figma-impl-config.json"
 IMPL_RESULT_FILE="$CLAUDE_DIR/impl-result.json"
 VERIFY_RESULT_FILE="$CLAUDE_DIR/verify-result.json"
 FIX_RESULT_FILE="$CLAUDE_DIR/fix-result.json"
+REVIEW_RESULT_FILE="$CLAUDE_DIR/review-result.json"
+DEV_SERVER_LOG="$CLAUDE_DIR/dev-server.log"
 
 # ============================================================
 # 中断处理
@@ -231,8 +233,8 @@ start_dev_server() {
     fi
 
     echo -e "  ${CYAN}启动 dev server: $dev_cmd${NC}"
-    # 后台启动 dev server
-    $dev_cmd &>/dev/null &
+    # 后台启动 dev server（输出到日志文件，避免 /dev/null 导致某些框架阻塞）
+    $dev_cmd > "$DEV_SERVER_LOG" 2>&1 &
     DEV_SERVER_PID=$!
 
     # 等待 dev server 启动
@@ -245,6 +247,9 @@ start_dev_server() {
             if ! kill -0 "$DEV_SERVER_PID" 2>/dev/null; then
                 echo ""
                 echo -e "${RED}  [x] Dev server 启动失败${NC}"
+                echo ""
+                echo -e "  日志: ${CYAN}$DEV_SERVER_LOG${NC}"
+                tail -5 "$DEV_SERVER_LOG" 2>/dev/null | sed 's/^/  > /'
                 echo ""
                 echo -e "  可能的原因："
                 echo -e "    1. 命令不正确: ${CYAN}$dev_cmd${NC}"
@@ -260,6 +265,9 @@ start_dev_server() {
             if [ "$wait_count" -ge "$start_timeout" ]; then
                 echo ""
                 echo -e "${RED}  [x] Dev server 启动超时（${start_timeout}s）${NC}"
+                echo ""
+                echo -e "  日志: ${CYAN}$DEV_SERVER_LOG${NC}"
+                tail -5 "$DEV_SERVER_LOG" 2>/dev/null | sed 's/^/  > /'
                 echo ""
                 echo -e "  可能的原因："
                 echo -e "    1. 项目编译时间过长，可尝试增大超时时间"
@@ -349,6 +357,18 @@ has_remaining_tasks() {
     local remaining
     remaining=$(jq '[.[] | select(.status == "pending" or .status == "in_progress")] | length' "$TASKS_FILE")
     [ "$remaining" -gt 0 ]
+}
+
+get_task_figma_url() {
+    local task_name="$1"
+    jq -r --arg name "$task_name" '[.[] | select(.name == $name)][0].figmaUrl // ""' "$TASKS_FILE"
+}
+
+has_figma_design() {
+    local task_name="$1"
+    local url
+    url=$(get_task_figma_url "$task_name")
+    [ -n "$url" ] && [ "$url" != "null" ] && [ "$url" != "" ]
 }
 
 get_next_task_name() {
@@ -599,7 +619,7 @@ while has_remaining_tasks; do
     fi
 
     # 每轮开始前清理上一轮的结果文件
-    rm -f "$IMPL_RESULT_FILE" "$VERIFY_RESULT_FILE" "$FIX_RESULT_FILE"
+    rm -f "$IMPL_RESULT_FILE" "$VERIFY_RESULT_FILE" "$FIX_RESULT_FILE" "$REVIEW_RESULT_FILE"
 
     echo ""
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -615,9 +635,33 @@ while has_remaining_tasks; do
     SCREENSHOT_WAIT=$(jq -r '.screenshotWaitMs // 3000' "$CONFIG_FILE")
     DEV_URL=$(jq -r '.devServerUrl // ""' "$CONFIG_FILE")
     VERIFY_THRESHOLD=$(jq -r '.verifyThreshold // 85' "$CONFIG_FILE")
+    REVIEW_THRESHOLD=$(jq -r '.reviewThreshold // 80' "$CONFIG_FILE")
 
-    # ── Prompt A: 实现 ──────────────────────────────────────
-    IMPL_PROMPT="你现在处于 figma-impl 的 harness 执行阶段，负责实现一个 Figma 设计稿功能。
+    # 判断任务类型
+    IS_DESIGN_TASK=true
+    if ! has_figma_design "$NEXT_TASK"; then
+        IS_DESIGN_TASK=false
+    fi
+
+    # 获取任务描述（纯逻辑任务需要用到）
+    TASK_DESCRIPTION=$(jq -r --arg name "$NEXT_TASK" '[.[] | select(.name == $name)][0].description // ""' "$TASKS_FILE")
+
+    # ── 共用的环境检查步骤 ──────────────────────────────────
+    COMMON_INIT_STEPS="### Step 1: 环境检查与状态恢复
+1. 读取 .claude/figma-impl-config.json 获取配置
+2. 读取 .claude/figma-tasks.json 获取任务列表
+3. 读取 .claude/figma-progress.md 获取历史上下文
+4. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范、技术栈约定和编码风格要求
+5. 读取 .claude/rules/figma-design-system.md 和 .claude/figma-design-rules.md（如果存在），了解设计系统规则
+6. git log --oneline -20 了解最近变更
+
+### Step 2: 选择任务
+找到名为「${NEXT_TASK}」的任务，将其 status 更新为 in_progress，立即写入 figma-tasks.json。
+【原子写入】写 JSON 时先写入 .tmp 文件再 mv 覆盖，防止中断导致损坏。"
+
+    if $IS_DESIGN_TASK; then
+        # ── Prompt A: Figma 设计稿实现 ──────────────────────────
+        IMPL_PROMPT="你现在处于 figma-impl 的 harness 执行阶段，负责实现一个 Figma 设计稿功能。
 你只需要完成代码实现，不需要做视觉验证（验证由独立会话完成）。
 
 当前任务: ${NEXT_TASK}
@@ -625,23 +669,13 @@ Dev Server URL: ${DEV_URL}
 
 ## 执行步骤
 
-### Step 1: 环境检查与状态恢复
-1. 读取 .claude/figma-impl-config.json 获取配置
-2. 读取 .claude/figma-tasks.json 获取任务列表
-3. 读取 .claude/figma-progress.md 获取历史上下文
-4. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范、技术栈约定和编码风格要求
-5. 读取 .claude/rules/figma-design-system.md 和 .claude/figma-design-rules.md（如果存在），了解设计系统规则
-6. 查找并读取 Figma 官方 implement-design skill：用 Glob 搜索 ~/.claude/plugins/cache/**/figma/*/skills/implement-design/SKILL.md，如果找到则读取，作为设计稿实现的最佳实践参考
-7. git log --oneline -20 了解最近变更
-
-### Step 2: 选择任务
-找到名为「${NEXT_TASK}」的任务，将其 status 更新为 in_progress，立即写入 figma-tasks.json。
-【原子写入】写 JSON 时先写入 .tmp 文件再 mv 覆盖，防止中断导致损坏。
+${COMMON_INIT_STEPS}
 
 ### Step 3: 获取 Figma 设计上下文
 1. 调用 Figma MCP 的 figma__get_design_context，传入 fileKey 和 nodeId，获取设计上下文和参考代码
 2. 调用 Figma MCP 的 figma__get_screenshot，传入 fileKey 和 nodeId，获取设计稿截图作为对照基准
 3. 仔细分析设计稿中的布局结构、颜色值、字体、间距、交互状态、组件层级
+4. 查找并读取 Figma 官方 implement-design skill：用 Glob 搜索 ~/.claude/plugins/cache/**/figma/*/skills/implement-design/SKILL.md，如果找到则读取，作为设计稿实现的最佳实践参考
 
 ### Step 4: 实现代码
 1. 根据 Figma 设计上下文和项目现有代码结构编写组件代码
@@ -661,8 +695,8 @@ Dev Server URL: ${DEV_URL}
 - 不要 git commit（由 harness 在验证通过后统一处理）
 - 必须将结果写入 .claude/impl-result.json，harness 通过该文件判断会话结果"
 
-    # ── Prompt B: 独立验证 ──────────────────────────────────
-    VERIFY_PROMPT="你是一个严格的视觉 QA 审查员。你的工作是对比 Figma 设计稿和实际实现的截图，找出所有差异。
+        # ── Prompt B: 视觉验证 ──────────────────────────────────
+        VERIFY_PROMPT="你是一个严格的视觉 QA 审查员。你的工作是对比 Figma 设计稿和实际实现的截图，找出所有差异。
 你不是实现者，你没有写这些代码，你对它没有感情。你的目标是找出问题，而不是找理由通过。
 
 ⚠️ 审查原则：
@@ -735,13 +769,126 @@ Dev Server URL: ${DEV_URL}
 - differences: 列出所有具体差异，格式为「维度: 具体描述」
 - 必须将结果写入 .claude/verify-result.json，这是唯一的结果传递方式"
 
-    # ── Prompt C: 修复（重试时使用）──────────────────────────
-    # FIX_PROMPT 在验证失败时动态生成，注入差异描述
+    else
+        # ── Prompt A': 纯逻辑实现 ──────────────────────────────
+        IMPL_PROMPT="你现在处于 figma-impl 的 harness 执行阶段，负责实现一个纯逻辑功能（无 Figma 设计稿）。
+你只需要完成代码实现，不需要做视觉验证（代码审查由独立会话完成）。
+
+当前任务: ${NEXT_TASK}
+任务描述: ${TASK_DESCRIPTION}
+Dev Server URL: ${DEV_URL}
+
+## 执行步骤
+
+${COMMON_INIT_STEPS}
+
+### Step 3: 分析需求
+1. 仔细阅读任务描述，理解需要实现的功能逻辑
+2. 阅读相关的已有代码，理解上下文和依赖关系
+3. 如果任务有 dependsOn，查看已完成的依赖任务产出的文件，确保与之衔接
+
+### Step 4: 实现代码
+1. 根据任务描述和项目现有代码结构编写功能代码
+2. 遵循项目现有的代码风格和目录结构
+3. 复用项目已有的组件、工具函数和类型定义
+4. 确保代码可编译运行，无 TypeScript/ESLint 错误
+5. 处理好边界条件和错误情况
+6. 如果涉及 API 调用，确保请求/响应类型正确
+7. 如果涉及状态管理，确保状态更新逻辑正确
+
+### Step 5: 写入结果
+确认代码已编写完成、可编译后，将结果写入 .claude/impl-result.json：
+- 实现完成：写入 {\"status\": \"done\"}
+- 无可执行任务：写入 {\"status\": \"no_task\"}
+
+## 注意事项
+- 不修改任务定义：只能修改 status 字段（设为 in_progress），不要改 name、description 等定义字段
+- 不要修改 verifyPassed 或 retryCount
+- 不要 git commit（由 harness 在审查通过后统一处理）
+- 必须将结果写入 .claude/impl-result.json，harness 通过该文件判断会话结果"
+
+        # ── Prompt B': 代码审查 ──────────────────────────────────
+        VERIFY_PROMPT="你是一个严格的代码审查员。你的工作是审查一个纯逻辑功能的代码实现质量。
+你不是实现者，你没有写这些代码，你对它没有感情。你的目标是找出问题，而不是找理由通过。
+
+⚠️ 审查原则：
+- 宁可误判为不通过，也不要放过问题
+- 不要为实现者找借口（如「整体实现不错」「小问题可以接受」）
+- 每个维度独立评分，不因其他维度表现好而放宽某个维度的标准
+- 如果某个需求点完全未实现，相关维度直接 0 分
+
+当前任务: ${NEXT_TASK}
+任务描述: ${TASK_DESCRIPTION}
+Dev Server URL: ${DEV_URL}
+通过阈值: 每项 ≥ 7 分且总分 ≥ ${REVIEW_THRESHOLD}%
+
+## 执行步骤
+
+### Step 1: 理解需求
+1. 读取 .claude/figma-tasks.json 获取当前任务信息（name、description）
+2. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范
+3. 理解任务的功能需求和预期行为
+
+### Step 2: 审查实现代码
+1. 通过 git diff HEAD~1（或 git status 查看变更文件）找到本次实现涉及的所有文件
+2. 逐文件阅读实现代码
+3. 如果任务涉及 UI 且 dev server 在运行，可通过 Chrome DevTools MCP 导航到相关页面检查运行时行为
+
+### Step 3: 逐项评分
+对以下每个维度独立打分（0-10 分），并列出具体问题。每个维度有不同权重，影响总分计算：
+
+| 维度 | 权重 | 评分标准 |
+|------|------|---------|
+| correctness | 2.5 | 功能逻辑是否正确，是否满足任务描述中的所有需求点 |
+| completeness | 2.0 | 是否实现了所有要求的功能，有无遗漏的需求点 |
+| error_handling | 1.5 | 边界条件处理、错误处理、异常情况是否考虑周全 |
+| code_quality | 1.5 | 代码可读性、命名规范、结构清晰度、是否遵循项目约定 |
+| type_safety | 1.0 | TypeScript 类型是否正确，有无 any 滥用、类型断言不当 |
+| integration | 1.5 | 与项目现有代码的集成是否合理，是否复用了已有组件/工具 |
+
+### Step 4: 写入结果
+将审查结果写入 .claude/review-result.json（harness 通过该文件读取评分），格式如下：
+
+{
+  \"passed\": false,
+  \"scores\": {
+    \"correctness\": 8,
+    \"completeness\": 6,
+    \"error_handling\": 7,
+    \"code_quality\": 8,
+    \"type_safety\": 9,
+    \"integration\": 7
+  },
+  \"total_score\": 74,
+  \"failed_dimensions\": [\"completeness\"],
+  \"issues\": [
+    \"completeness: 任务要求支持分页加载，但当前实现只获取了第一页数据\",
+    \"error_handling: fetchUserData 没有处理网络超时的情况\",
+    \"integration: 项目已有 useRequest hook，但这里自己写了 fetch 逻辑\"
+  ]
+}
+
+评分规则：
+- 各维度权重: correctness=2.5, completeness=2.0, error_handling=1.5, code_quality=1.5, type_safety=1.0, integration=1.5（权重总和=10.0）
+- total_score = Σ(维度分数 × 维度权重) / (权重总和 × 10) × 100，四舍五入取整
+- passed = true 当且仅当：total_score >= ${REVIEW_THRESHOLD} 且所有维度 >= 7
+- failed_dimensions: 列出所有 < 7 分的维度
+- issues: 列出所有具体问题，格式为「维度: 具体描述」
+- 必须将结果写入 .claude/review-result.json，这是唯一的结果传递方式"
+
+    fi
+
+    # ── Prompt C/C': 修复（重试时使用，根据任务类型动态生成）──────
+    # FIX_PROMPT 在验证/审查失败时动态生成，注入差异/问题描述
 
     # ================================================================
     # 阶段 1: 实现代码
     # ================================================================
-    echo -e "  ${CYAN}[实现阶段]${NC} 启动 Claude 实现会话..."
+    if $IS_DESIGN_TASK; then
+        echo -e "  ${CYAN}[实现阶段]${NC} 启动 Claude 实现会话..."
+    else
+        echo -e "  ${CYAN}[实现阶段]${NC} 启动 Claude 实现会话... ${DIM}(纯逻辑任务)${NC}"
+    fi
 
     run_claude_session "$IMPL_PROMPT"
     IMPL_ELAPSED=$RCS_ELAPSED
@@ -792,33 +939,46 @@ Dev Server URL: ${DEV_URL}
     echo -e "${GREEN}  -> 实现完成  耗时: ${IMPL_ELAPSED_STR}${NC}"
 
     # ================================================================
-    # 阶段 2: 验证循环（harness 控制重试）
+    # 阶段 2: 验证/审查循环（harness 控制重试）
     # ================================================================
     RETRY_COUNT=0
     TASK_PASSED=false
     TOTAL_VERIFY_ELAPSED=0
     LAST_DIFFERENCES=""
 
+    # 根据任务类型选择结果文件和标签
+    if $IS_DESIGN_TASK; then
+        RESULT_FILE="$VERIFY_RESULT_FILE"
+        STAGE_LABEL="验证"
+        DIFF_FIELD="differences"
+        CURRENT_THRESHOLD="$VERIFY_THRESHOLD"
+    else
+        RESULT_FILE="$REVIEW_RESULT_FILE"
+        STAGE_LABEL="审查"
+        DIFF_FIELD="issues"
+        CURRENT_THRESHOLD="$REVIEW_THRESHOLD"
+    fi
+
     while [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; do
         $INTERRUPTED && break
 
         if [ "$RETRY_COUNT" -eq 0 ]; then
-            echo -e "  ${CYAN}[验证阶段]${NC} 启动独立验证会话..."
+            echo -e "  ${CYAN}[${STAGE_LABEL}阶段]${NC} 启动独立${STAGE_LABEL}会话..."
         else
-            echo -e "  ${CYAN}[验证阶段]${NC} 第 ${RETRY_COUNT} 次修复后重新验证..."
+            echo -e "  ${CYAN}[${STAGE_LABEL}阶段]${NC} 第 ${RETRY_COUNT} 次修复后重新${STAGE_LABEL}..."
         fi
 
-        # 运行验证会话（每次验证前清理旧结果）
-        rm -f "$VERIFY_RESULT_FILE"
+        # 运行验证/审查会话（每次前清理旧结果）
+        rm -f "$RESULT_FILE"
         run_claude_session "$VERIFY_PROMPT"
         VERIFY_ELAPSED=$RCS_ELAPSED
         TOTAL_VERIFY_ELAPSED=$((TOTAL_VERIFY_ELAPSED + VERIFY_ELAPSED))
 
         $INTERRUPTED && break
 
-        # 验证超时
+        # 超时处理
         if [ "$RCS_EXIT_CODE" -eq 124 ]; then
-            echo -e "${RED}  -> 验证超时  ${NC}"
+            echo -e "${RED}  -> ${STAGE_LABEL}超时  ${NC}"
             RETRY_COUNT=$((RETRY_COUNT + 1))
             jq --argjson rc "$RETRY_COUNT" \
                 'map(if .status == "in_progress" then .retryCount = $rc else . end)' \
@@ -826,40 +986,61 @@ Dev Server URL: ${DEV_URL}
             continue
         fi
 
-        # 从结果文件读取验证 JSON，由脚本重新计算 total_score / passed / failed_dimensions（不信任 LLM 的数学）
-        if [ -f "$VERIFY_RESULT_FILE" ] && jq empty "$VERIFY_RESULT_FILE" 2>/dev/null; then
-            LAST_DIFFERENCES=$(jq -r '.differences | join("\n")' "$VERIFY_RESULT_FILE")
+        # 从结果文件读取 JSON，由脚本重新计算评分（不信任 LLM 的数学）
+        if [ -f "$RESULT_FILE" ] && jq empty "$RESULT_FILE" 2>/dev/null; then
+            LAST_DIFFERENCES=$(jq -r --arg field "$DIFF_FIELD" '.[$field] | join("\n")' "$RESULT_FILE")
 
-            # 用 jq 根据权重重新计算总分、未达标维度、是否通过
-            VERIFIED_JSON=$(jq --argjson threshold "$VERIFY_THRESHOLD" '
-              {"layout":2.0,"spacing":1.5,"colors":1.5,"typography":1.0,"borders":0.5,"shadows":0.5,"icons_images":1.0,"completeness":2.0} as $w
-              | 10.0 as $wsum
-              | .scores as $s
-              | ($s | to_entries | map(.value * $w[.key]) | add) as $weighted
-              | (($weighted / ($wsum * 10) * 100) | round) as $total
-              | ($s | to_entries | map(select(.value < 7)) | map(.key)) as $failed
-              | ($total >= $threshold and ($failed | length) == 0) as $passed
-              | { total_score: $total, passed: $passed, failed_dimensions: $failed }
-            ' "$VERIFY_RESULT_FILE")
+            if $IS_DESIGN_TASK; then
+                # 视觉验证：使用设计稿维度和权重
+                VERIFIED_JSON=$(jq --argjson threshold "$CURRENT_THRESHOLD" '
+                  {"layout":2.0,"spacing":1.5,"colors":1.5,"typography":1.0,"borders":0.5,"shadows":0.5,"icons_images":1.0,"completeness":2.0} as $w
+                  | 10.0 as $wsum
+                  | .scores as $s
+                  | ($s | to_entries | map(.value * $w[.key]) | add) as $weighted
+                  | (($weighted / ($wsum * 10) * 100) | round) as $total
+                  | ($s | to_entries | map(select(.value < 7)) | map(.key)) as $failed
+                  | ($total >= $threshold and ($failed | length) == 0) as $passed
+                  | { total_score: $total, passed: $passed, failed_dimensions: $failed }
+                ' "$RESULT_FILE")
+            else
+                # 代码审查：使用代码维度和权重
+                VERIFIED_JSON=$(jq --argjson threshold "$CURRENT_THRESHOLD" '
+                  {"correctness":2.5,"completeness":2.0,"error_handling":1.5,"code_quality":1.5,"type_safety":1.0,"integration":1.5} as $w
+                  | 10.0 as $wsum
+                  | .scores as $s
+                  | ($s | to_entries | map(.value * $w[.key]) | add) as $weighted
+                  | (($weighted / ($wsum * 10) * 100) | round) as $total
+                  | ($s | to_entries | map(select(.value < 7)) | map(.key)) as $failed
+                  | ($total >= $threshold and ($failed | length) == 0) as $passed
+                  | { total_score: $total, passed: $passed, failed_dimensions: $failed }
+                ' "$RESULT_FILE")
+            fi
 
             TOTAL_SCORE=$(echo "$VERIFIED_JSON" | jq -r '.total_score')
             VERIFY_PASSED=$(echo "$VERIFIED_JSON" | jq -r '.passed')
             FAILED_DIMS=$(echo "$VERIFIED_JSON" | jq -r '.failed_dimensions | join(", ")')
 
             # 打印评分详情
-            echo -e "  ${BOLD}验证评分:${NC}"
-            jq -r '
-              {"layout":2.0,"spacing":1.5,"colors":1.5,"typography":1.0,"borders":0.5,"shadows":0.5,"icons_images":1.0,"completeness":2.0} as $w
-              | .scores | to_entries[] | "    \(.key): \(.value)/10 (×\($w[.key] // 1.0))"
-            ' "$VERIFY_RESULT_FILE"
-            echo -e "    ${BOLD}总分: ${TOTAL_SCORE}%${NC} (阈值: ${VERIFY_THRESHOLD}%)"
+            echo -e "  ${BOLD}${STAGE_LABEL}评分:${NC}"
+            if $IS_DESIGN_TASK; then
+                jq -r '
+                  {"layout":2.0,"spacing":1.5,"colors":1.5,"typography":1.0,"borders":0.5,"shadows":0.5,"icons_images":1.0,"completeness":2.0} as $w
+                  | .scores | to_entries[] | "    \(.key): \(.value)/10 (×\($w[.key] // 1.0))"
+                ' "$RESULT_FILE"
+            else
+                jq -r '
+                  {"correctness":2.5,"completeness":2.0,"error_handling":1.5,"code_quality":1.5,"type_safety":1.0,"integration":1.5} as $w
+                  | .scores | to_entries[] | "    \(.key): \(.value)/10 (×\($w[.key] // 1.0))"
+                ' "$RESULT_FILE"
+            fi
+            echo -e "    ${BOLD}总分: ${TOTAL_SCORE}%${NC} (阈值: ${CURRENT_THRESHOLD}%)"
             if [ -n "$FAILED_DIMS" ] && [ "$FAILED_DIMS" != "" ]; then
                 echo -e "    ${RED}未达标维度: ${FAILED_DIMS}${NC}"
             fi
         else
-            echo -e "${YELLOW}  -> 验证结果文件不存在或解析失败，视为未通过${NC}"
+            echo -e "${YELLOW}  -> ${STAGE_LABEL}结果文件不存在或解析失败，视为未通过${NC}"
             VERIFY_PASSED=false
-            LAST_DIFFERENCES="验证结果文件不存在或解析失败"
+            LAST_DIFFERENCES="${STAGE_LABEL}结果文件不存在或解析失败"
         fi
 
         # 判定结果
@@ -874,15 +1055,17 @@ Dev Server URL: ${DEV_URL}
             'map(if .status == "in_progress" then .retryCount = $rc else . end)' \
             "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
 
-        echo -e "  ${YELLOW}验证未通过 (retry ${RETRY_COUNT}/${MAX_RETRIES})${NC}"
+        echo -e "  ${YELLOW}${STAGE_LABEL}未通过 (retry ${RETRY_COUNT}/${MAX_RETRIES})${NC}"
 
         if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
             break
         fi
 
-        # 生成修复 prompt，注入差异描述
+        # 生成修复 prompt，根据任务类型注入不同内容
         echo -e "  ${CYAN}[修复阶段]${NC} 启动修复会话..."
-        FIX_PROMPT="你现在处于 figma-impl 的 harness 执行阶段，需要修复一个 Figma 设计稿实现的视觉差异。
+
+        if $IS_DESIGN_TASK; then
+            FIX_PROMPT="你现在处于 figma-impl 的 harness 执行阶段，需要修复一个 Figma 设计稿实现的视觉差异。
 独立的视觉 QA 审查员已经检查了你的实现，发现以下问题：
 
 当前任务: ${NEXT_TASK}
@@ -911,6 +1094,38 @@ ${LAST_DIFFERENCES}
 ### Step 3: 写入结果
 修复完成后，将结果写入 .claude/fix-result.json：
 - 写入 {\"status\": \"done\"}"
+        else
+            FIX_PROMPT="你现在处于 figma-impl 的 harness 执行阶段，需要修复一个纯逻辑功能实现中的代码问题。
+独立的代码审查员已经检查了你的实现，发现以下问题：
+
+当前任务: ${NEXT_TASK}
+任务描述: ${TASK_DESCRIPTION}
+Dev Server URL: ${DEV_URL}
+当前重试次数: ${RETRY_COUNT}/${MAX_RETRIES}
+
+## 代码审查员发现的问题
+
+${LAST_DIFFERENCES}
+
+## 执行步骤
+
+### Step 1: 理解问题
+1. 读取 .claude/figma-tasks.json 获取当前任务信息
+2. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范
+3. 仔细阅读上面列出的每一个问题点
+4. 阅读相关代码，理解问题上下文
+
+### Step 2: 针对性修复
+针对上述每个问题点逐一修复代码。注意：
+- 只修复上面列出的问题，不要做无关改动
+- 确保修复不会引入新的问题
+- 确保代码可编译运行
+- 注意边界条件和错误处理
+
+### Step 3: 写入结果
+修复完成后，将结果写入 .claude/fix-result.json：
+- 写入 {\"status\": \"done\"}"
+        fi
 
         rm -f "$FIX_RESULT_FILE"
         run_claude_session "$FIX_PROMPT"
