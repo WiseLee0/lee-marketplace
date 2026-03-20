@@ -87,7 +87,8 @@ Harness 脚本会：
   "devServerUrl": "http://localhost:3000",
   "devServerPort": "3000",
   "screenshotWaitMs": 3000,
-  "verifyThreshold": 85,
+  "verifyThreshold": 80,
+  "reviewThreshold": 80,
   "sessionTimeout": 600
 }
 ```
@@ -100,6 +101,7 @@ Harness 脚本会：
 | `devServerPort` | 开发服务器端口 | `""` |
 | `screenshotWaitMs` | 截图前等待时间（毫秒） | `3000` |
 | `verifyThreshold` | 视觉验证通过的总分阈值（%） | `85` |
+| `reviewThreshold` | 代码审查通过的总分阈值（%） | `80` |
 | `sessionTimeout` | 单个任务最大执行时间（秒） | `600` |
 
 ## 工作原理

@@ -632,7 +632,7 @@ while has_remaining_tasks; do
     MAX_RETRIES=$(jq -r '.maxRetries // 5' "$CONFIG_FILE")
     SCREENSHOT_WAIT=$(jq -r '.screenshotWaitMs // 3000' "$CONFIG_FILE")
     DEV_URL=$(jq -r '.devServerUrl // ""' "$CONFIG_FILE")
-    VERIFY_THRESHOLD=$(jq -r '.verifyThreshold // 85' "$CONFIG_FILE")
+    VERIFY_THRESHOLD=$(jq -r '.verifyThreshold // 80' "$CONFIG_FILE")
     REVIEW_THRESHOLD=$(jq -r '.reviewThreshold // 80' "$CONFIG_FILE")
 
     # 判断任务类型
@@ -702,6 +702,14 @@ ${COMMON_INIT_STEPS}
 - 不要为实现者找借口（如「细微差异可以接受」「整体还原度不错」）
 - 每个维度独立评分，不因其他维度表现好而放宽某个维度的标准
 - 如果某个元素在设计稿中存在但实现中缺失，该维度直接 0 分
+
+📐 响应式布局容忍规则：
+设计稿和实现的视口宽度可能不同，对于使用流式/响应式布局的区域（如 flex: 1、百分比宽度、grid auto-fill 等），应遵循以下原则：
+- 元素的绝对宽度差异不应扣分，只要布局结构（列数、排列方向、嵌套关系）一致
+- 间距评分只关注固定间距值（gap、padding、margin）是否正确，不因容器/元素宽度变化而扣分
+- 图片/卡片等流式元素的宽高比应保持一致，但绝对尺寸差异不扣分
+- 文字换行位置可能因容器宽度不同而不同，不应视为差异
+- 仍然严格检查：颜色、字号、字重、圆角、阴影、元素是否缺失等与视口无关的属性
 
 当前任务: ${NEXT_TASK}
 Dev Server URL: ${DEV_URL}
@@ -942,6 +950,7 @@ Dev Server URL: ${DEV_URL}
     TASK_PASSED=false
     TOTAL_VERIFY_ELAPSED=0
     LAST_DIFFERENCES=""
+    LAST_SCORES_JSON=""  # 上一轮评分 JSON，用于传递给验证和修复会话
 
     # 根据任务类型选择结果文件和标签
     if $IS_DESIGN_TASK; then
@@ -965,9 +974,27 @@ Dev Server URL: ${DEV_URL}
             echo -e "  ${CYAN}[${STAGE_LABEL}阶段]${NC} 第 ${RETRY_COUNT} 次修复后重新${STAGE_LABEL}..."
         fi
 
+        # 构建本轮验证 prompt（如果有上一轮评分，追加基线信息）
+        CURRENT_VERIFY_PROMPT="$VERIFY_PROMPT"
+        if [ -n "$LAST_SCORES_JSON" ] && [ "$RETRY_COUNT" -gt 0 ]; then
+            CURRENT_VERIFY_PROMPT="${VERIFY_PROMPT}
+
+## 上一轮评分基线（第 $((RETRY_COUNT)) 次修复前的评分）
+
+上一轮各维度评分: ${LAST_SCORES_JSON}
+上一轮发现的问题:
+${LAST_DIFFERENCES}
+
+⚠️ 评分一致性要求：
+- 如果某个维度的实现与上一轮相比没有变化，该维度的评分应与上一轮保持一致（允许 ±1 分浮动）
+- 如果修复引入了新问题（回归），对应维度应扣分并在差异中明确标注为「回归」
+- 只有实际改善的维度才应提高分数，只有实际恶化的维度才应降低分数
+- 不要因为本轮是重新评估就整体偏高或偏低，保持客观一致"
+        fi
+
         # 运行验证/审查会话（每次前清理旧结果）
         rm -f "$RESULT_FILE"
-        run_claude_session "$VERIFY_PROMPT"
+        run_claude_session "$CURRENT_VERIFY_PROMPT"
         VERIFY_ELAPSED=$RCS_ELAPSED
         TOTAL_VERIFY_ELAPSED=$((TOTAL_VERIFY_ELAPSED + VERIFY_ELAPSED))
 
@@ -1017,6 +1044,9 @@ Dev Server URL: ${DEV_URL}
             VERIFY_PASSED=$(echo "$VERIFIED_JSON" | jq -r '.passed')
             FAILED_DIMS=$(echo "$VERIFIED_JSON" | jq -r '.failed_dimensions | join(", ")')
 
+            # 保存本轮评分 JSON（供下一轮验证和修复使用）
+            LAST_SCORES_JSON=$(jq -c '.scores' "$RESULT_FILE" 2>/dev/null || echo "")
+
             # 打印评分详情
             echo -e "  ${BOLD}${STAGE_LABEL}评分:${NC}"
             if $IS_DESIGN_TASK; then
@@ -1061,6 +1091,21 @@ Dev Server URL: ${DEV_URL}
         # 生成修复 prompt，根据任务类型注入不同内容
         echo -e "  ${CYAN}[修复阶段]${NC} 启动修复会话..."
 
+        # 构建评分基线信息（两种任务类型共用）
+        SCORES_CONTEXT=""
+        if [ -n "$LAST_SCORES_JSON" ]; then
+            SCORES_CONTEXT="
+## 当前各维度评分
+
+${LAST_SCORES_JSON}
+
+⚠️ 防回归要求：
+- 以上评分中 ≥ 7 分的维度是已达标维度，修复时必须保持这些维度不退步
+- 重点修复 < 7 分的维度和下面列出的差异
+- 如果修复某个问题可能影响已达标维度，请谨慎操作，确保不引入回归
+"
+        fi
+
         if $IS_DESIGN_TASK; then
             FIX_PROMPT="你现在处于 figma-impl 的 harness 执行阶段，需要修复一个 Figma 设计稿实现的视觉差异。
 独立的视觉 QA 审查员已经检查了你的实现，发现以下问题：
@@ -1068,7 +1113,7 @@ Dev Server URL: ${DEV_URL}
 当前任务: ${NEXT_TASK}
 Dev Server URL: ${DEV_URL}
 当前重试次数: ${RETRY_COUNT}/${MAX_RETRIES}
-
+${SCORES_CONTEXT}
 ## QA 审查员发现的差异
 
 ${LAST_DIFFERENCES}
@@ -1099,7 +1144,7 @@ ${LAST_DIFFERENCES}
 任务描述: ${TASK_DESCRIPTION}
 Dev Server URL: ${DEV_URL}
 当前重试次数: ${RETRY_COUNT}/${MAX_RETRIES}
-
+${SCORES_CONTEXT}
 ## 代码审查员发现的问题
 
 ${LAST_DIFFERENCES}

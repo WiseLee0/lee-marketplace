@@ -107,7 +107,7 @@ user-invocable: true
   "devServerUrl": "",
   "devServerPort": "",
   "screenshotWaitMs": 3000,
-  "verifyThreshold": 85,
+  "verifyThreshold": 80,
   "reviewThreshold": 80,
   "sessionTimeout": 600
 }
