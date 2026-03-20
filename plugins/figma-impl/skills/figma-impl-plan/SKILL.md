@@ -107,8 +107,6 @@ user-invocable: true
   "devServerUrl": "",
   "devServerPort": "",
   "screenshotWaitMs": 3000,
-  "viewportWidth": 1440,
-  "viewportHeight": 900,
   "verifyThreshold": 85,
   "reviewThreshold": 80,
   "sessionTimeout": 600

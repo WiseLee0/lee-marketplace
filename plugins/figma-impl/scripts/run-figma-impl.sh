@@ -629,8 +629,6 @@ while has_remaining_tasks; do
     echo ""
 
     # 读取配置值用于 prompt
-    VIEWPORT_W=$(jq -r '.viewportWidth // 1440' "$CONFIG_FILE")
-    VIEWPORT_H=$(jq -r '.viewportHeight // 900' "$CONFIG_FILE")
     MAX_RETRIES=$(jq -r '.maxRetries // 5' "$CONFIG_FILE")
     SCREENSHOT_WAIT=$(jq -r '.screenshotWaitMs // 3000' "$CONFIG_FILE")
     DEV_URL=$(jq -r '.devServerUrl // ""' "$CONFIG_FILE")
@@ -717,10 +715,9 @@ Dev Server URL: ${DEV_URL}
 
 ### Step 2: 截取实现截图
 1. Dev server 已由 harness 脚本启动，无需你再启动
-2. 使用 Chrome DevTools MCP 的 resize_page 设置视口为 ${VIEWPORT_W} x ${VIEWPORT_H}
-3. 使用 Chrome DevTools MCP 的 navigate_page 导航到目标页面（type=\"url\", url=目标URL）
-4. 等待页面完全加载（等待 ${SCREENSHOT_WAIT} 毫秒，可用 wait_for 等待关键文本出现）
-5. 使用 Chrome DevTools MCP 的 take_screenshot 截取当前实现的截图
+2. 使用 Chrome DevTools MCP 的 navigate_page 导航到目标页面（type=\"url\", url=目标URL）
+3. 等待页面完全加载（等待 ${SCREENSHOT_WAIT} 毫秒，可用 wait_for 等待关键文本出现）
+4. 使用 Chrome DevTools MCP 的 take_screenshot 截取当前实现的截图
 
 ### Step 3: 逐项对比评分
 对以下每个维度独立打分（0-10 分），并列出具体差异。每个维度有不同权重，影响总分计算：
