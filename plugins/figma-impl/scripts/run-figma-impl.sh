@@ -689,18 +689,18 @@ Dev Server URL: ${DEV_URL}
 5. 使用 Chrome DevTools MCP 的 take_screenshot 截取当前实现的截图
 
 ### Step 3: 逐项对比评分
-对以下每个维度独立打分（0-10 分），并列出具体差异：
+对以下每个维度独立打分（0-10 分），并列出具体差异。每个维度有不同权重，影响总分计算：
 
-| 维度 | 评分标准 |
-|------|---------|
-| layout | 整体布局结构是否一致（flex/grid方向、嵌套层级、元素排列顺序） |
-| spacing | padding/margin/gap 是否匹配（允许 ±2px 误差） |
-| colors | 背景色、文字色、边框色、渐变是否匹配 |
-| typography | 字号、字重、行高、字体是否匹配 |
-| borders | 圆角、边框宽度、边框样式是否匹配 |
-| shadows | 阴影是否匹配（包括无阴影 vs 有阴影） |
-| icons_images | 图标/图片是否存在、尺寸是否正确、位置是否正确 |
-| completeness | 设计稿中所有元素是否都已实现（无遗漏） |
+| 维度 | 权重 | 评分标准 |
+|------|------|---------|
+| layout | 2.0 | 整体布局结构是否一致（flex/grid方向、嵌套层级、元素排列顺序） |
+| spacing | 1.5 | padding/margin/gap 是否匹配（允许 ±2px 误差） |
+| colors | 1.5 | 背景色、文字色、边框色、渐变是否匹配 |
+| typography | 1.0 | 字号、字重、行高、字体是否匹配 |
+| borders | 0.5 | 圆角、边框宽度、边框样式是否匹配 |
+| shadows | 0.5 | 阴影是否匹配（包括无阴影 vs 有阴影） |
+| icons_images | 1.0 | 图标/图片是否存在、尺寸是否正确、位置是否正确 |
+| completeness | 2.0 | 设计稿中所有元素是否都已实现（无遗漏） |
 
 ### Step 4: 写入结果
 将验证结果写入 .claude/verify-result.json（harness 通过该文件读取评分），格式如下：
@@ -727,7 +727,9 @@ Dev Server URL: ${DEV_URL}
 }
 
 评分规则：
-- total_score = 所有维度分数之和 / (维度数 × 10) × 100，四舍五入取整
+- 各维度权重: layout=2.0, spacing=1.5, colors=1.5, typography=1.0, borders=0.5, shadows=0.5, icons_images=1.0, completeness=2.0（权重总和=10.0）
+- total_score = Σ(维度分数 × 维度权重) / (权重总和 × 10) × 100，四舍五入取整
+  示例: layout=8(×2.0=16) + spacing=6(×1.5=9) + colors=9(×1.5=13.5) + typography=7(×1.0=7) + borders=8(×0.5=4) + shadows=10(×0.5=5) + icons_images=5(×1.0=5) + completeness=7(×2.0=14) = 73.5 → total_score = 74
 - passed = true 当且仅当：total_score >= ${VERIFY_THRESHOLD} 且所有维度 >= 7
 - failed_dimensions: 列出所有 < 7 分的维度
 - differences: 列出所有具体差异，格式为「维度: 具体描述」
@@ -824,16 +826,32 @@ Dev Server URL: ${DEV_URL}
             continue
         fi
 
-        # 从结果文件读取验证 JSON
+        # 从结果文件读取验证 JSON，由脚本重新计算 total_score / passed / failed_dimensions（不信任 LLM 的数学）
         if [ -f "$VERIFY_RESULT_FILE" ] && jq empty "$VERIFY_RESULT_FILE" 2>/dev/null; then
-            VERIFY_PASSED=$(jq -r '.passed' "$VERIFY_RESULT_FILE")
-            TOTAL_SCORE=$(jq -r '.total_score' "$VERIFY_RESULT_FILE")
-            FAILED_DIMS=$(jq -r '.failed_dimensions | join(", ")' "$VERIFY_RESULT_FILE")
             LAST_DIFFERENCES=$(jq -r '.differences | join("\n")' "$VERIFY_RESULT_FILE")
+
+            # 用 jq 根据权重重新计算总分、未达标维度、是否通过
+            VERIFIED_JSON=$(jq --argjson threshold "$VERIFY_THRESHOLD" '
+              {"layout":2.0,"spacing":1.5,"colors":1.5,"typography":1.0,"borders":0.5,"shadows":0.5,"icons_images":1.0,"completeness":2.0} as $w
+              | 10.0 as $wsum
+              | .scores as $s
+              | ($s | to_entries | map(.value * $w[.key]) | add) as $weighted
+              | (($weighted / ($wsum * 10) * 100) | round) as $total
+              | ($s | to_entries | map(select(.value < 7)) | map(.key)) as $failed
+              | ($total >= $threshold and ($failed | length) == 0) as $passed
+              | { total_score: $total, passed: $passed, failed_dimensions: $failed }
+            ' "$VERIFY_RESULT_FILE")
+
+            TOTAL_SCORE=$(echo "$VERIFIED_JSON" | jq -r '.total_score')
+            VERIFY_PASSED=$(echo "$VERIFIED_JSON" | jq -r '.passed')
+            FAILED_DIMS=$(echo "$VERIFIED_JSON" | jq -r '.failed_dimensions | join(", ")')
 
             # 打印评分详情
             echo -e "  ${BOLD}验证评分:${NC}"
-            jq -r '.scores | to_entries[] | "    \(.key): \(.value)/10"' "$VERIFY_RESULT_FILE"
+            jq -r '
+              {"layout":2.0,"spacing":1.5,"colors":1.5,"typography":1.0,"borders":0.5,"shadows":0.5,"icons_images":1.0,"completeness":2.0} as $w
+              | .scores | to_entries[] | "    \(.key): \(.value)/10 (×\($w[.key] // 1.0))"
+            ' "$VERIFY_RESULT_FILE"
             echo -e "    ${BOLD}总分: ${TOTAL_SCORE}%${NC} (阈值: ${VERIFY_THRESHOLD}%)"
             if [ -n "$FAILED_DIMS" ] && [ "$FAILED_DIMS" != "" ]; then
                 echo -e "    ${RED}未达标维度: ${FAILED_DIMS}${NC}"

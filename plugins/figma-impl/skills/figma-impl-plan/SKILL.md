@@ -103,8 +103,9 @@ user-invocable: true
   "devServerUrl": "",
   "devServerPort": "",
   "screenshotWaitMs": 3000,
-  "viewportWidth": 1920,
-  "viewportHeight": 1080,
+  "viewportWidth": 1440,
+  "viewportHeight": 900,
+  "verifyThreshold": 85,
   "sessionTimeout": 600
 }
 ```
