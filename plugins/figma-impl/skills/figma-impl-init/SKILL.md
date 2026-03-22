@@ -45,7 +45,7 @@ chmod +x ./run-figma-impl.sh
   "devServerCommand": "",
   "devServerUrl": "",
   "devServerPort": "",
-  "screenshotWaitMs": 3000,
+  "screenshotWaitMs": 10000,
   "verifyThreshold": 80,
   "reviewThreshold": 80,
   "sessionTimeout": 600

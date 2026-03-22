@@ -340,7 +340,8 @@ get_task_counts() {
         ([.[] | select(.status == "pending")] | length),
         ([.[] | select(.status == "in_progress")] | length),
         ([.[] | select(.status == "done")] | length),
-        ([.[] | select(.status == "failed")] | length)
+        ([.[] | select(.status == "failed")] | length),
+        ([.[] | select(.status == "skipped")] | length)
     ] | join(" ")' "$TASKS_FILE"
 }
 
@@ -354,20 +355,23 @@ read_task_counts() {
     TC_IN_PROGRESS=$(echo "$counts_str" | cut -d' ' -f3)
     TC_DONE=$(echo "$counts_str" | cut -d' ' -f4)
     TC_FAILED=$(echo "$counts_str" | cut -d' ' -f5)
+    TC_SKIPPED=$(echo "$counts_str" | cut -d' ' -f6)
 }
 
 print_status() {
     read_task_counts
-    local total=$TC_TOTAL pending=$TC_PENDING in_progress=$TC_IN_PROGRESS done=$TC_DONE failed=$TC_FAILED
+    local total=$TC_TOTAL pending=$TC_PENDING in_progress=$TC_IN_PROGRESS done=$TC_DONE failed=$TC_FAILED skipped=$TC_SKIPPED
 
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BOLD}  Figma Impl — 任务状态${NC}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo -e "  总计: ${BOLD}$total${NC}  |  待执行: ${BLUE}$pending${NC}  |  进行中: ${YELLOW}$in_progress${NC}  |  完成: ${GREEN}$done${NC}  |  失败: ${RED}$failed${NC}"
+    local status_line="  总计: ${BOLD}$total${NC}  |  待执行: ${BLUE}$pending${NC}  |  进行中: ${YELLOW}$in_progress${NC}  |  完成: ${GREEN}$done${NC}  |  失败: ${RED}$failed${NC}"
+    [ "$skipped" -gt 0 ] && status_line="${status_line}  |  跳过: ${YELLOW}$skipped${NC}"
+    echo -e "$status_line"
     echo ""
 
-    jq -r '.[] | "  [\(.id)] \(.status | if . == "done" then "\u2705" elif . == "failed" then "\u274c" elif . == "in_progress" then "\ud83d\udd04" else "\u23f3" end) \(.name)\(if .retryCount > 0 then " (retry \(.retryCount))" else "" end)\(if .lastError != "" then " — \(.lastError)" else "" end)"' "$TASKS_FILE"
+    jq -r '.[] | "  [\(.id)] \(.status | if . == "done" then "\u2705" elif . == "failed" then "\u274c" elif . == "in_progress" then "\ud83d\udd04" elif . == "skipped" then "\u23ed\ufe0f" else "\u23f3" end) \(.name)\(if .retryCount > 0 then " (retry \(.retryCount))" else "" end)\(if .lastError != "" then " — \(.lastError)" else "" end)"' "$TASKS_FILE"
     echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
@@ -432,8 +436,43 @@ EOF
 }
 
 reset_failed_tasks() {
-    jq 'map(if .status == "failed" then .status = "pending" | .verifyPassed = false | .retryCount = 0 | .lastError = "" else . end)' \
+    jq 'map(if .status == "failed" or .status == "skipped" then .status = "pending" | .verifyPassed = false | .retryCount = 0 | .lastError = "" else . end)' \
         "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+}
+
+# 失败传播：将传递性依赖于指定失败任务的 pending 任务标记为 skipped
+# 用法: propagate_failure <failed_task_id>
+propagate_failure() {
+    local failed_id="$1"
+    local failed_name
+    failed_name=$(jq -r --argjson id "$failed_id" '[.[] | select(.id == $id)][0].name // "unknown"' "$TASKS_FILE")
+
+    # 用 jq 递归找出所有传递性依赖于 failed_id 的 pending 任务并标记为 skipped
+    jq --argjson fid "$failed_id" --arg fname "$failed_name" '
+        def collect_blocked($seed; $tasks):
+            [$tasks[] | select(.status == "pending" or .status == "skipped") |
+             select(.dependsOn | any(. as $d | $seed | any(. == $d)))] |
+            map(.id) | . as $new |
+            ($seed + $new | unique) | . as $merged |
+            if ($merged | length) == ($seed | length) then $merged
+            else collect_blocked($merged; $tasks)
+            end;
+        . as $tasks | collect_blocked([$fid]; $tasks) as $blocked |
+        map(
+            .id as $tid |
+            if ($tid != $fid) and (.status == "pending") and ($blocked | any(. == $tid)) then
+                .status = "skipped" | .lastError = "依赖任务失败: \($fname) (#\($fid))"
+            else .
+            end
+        )
+    ' "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+    # 统计被跳过的数量
+    local skipped_count
+    skipped_count=$(jq '[.[] | select(.status == "skipped")] | length' "$TASKS_FILE")
+    if [ "$skipped_count" -gt 0 ]; then
+        echo -e "${YELLOW}  -> 已跳过 ${skipped_count} 个依赖任务（依赖 #${failed_id} ${failed_name}）${NC}"
+    fi
 }
 
 # 运行一次 Claude 会话
@@ -490,33 +529,36 @@ run_claude_session() {
 
 prompt_history_action() {
     read_task_counts
-    local total=$TC_TOTAL pending=$TC_PENDING in_progress=$TC_IN_PROGRESS done=$TC_DONE failed=$TC_FAILED
+    local total=$TC_TOTAL pending=$TC_PENDING in_progress=$TC_IN_PROGRESS done=$TC_DONE failed=$TC_FAILED skipped=$TC_SKIPPED
+    local failed_or_skipped=$((failed + skipped))
 
     # 全部 pending，首次运行，直接开始
-    if [ "$done" -eq 0 ] && [ "$failed" -eq 0 ] && [ "$in_progress" -eq 0 ]; then
+    if [ "$done" -eq 0 ] && [ "$failed" -eq 0 ] && [ "$in_progress" -eq 0 ] && [ "$skipped" -eq 0 ]; then
         return 0
     fi
 
     echo ""
     echo -e "${BOLD}  检测到历史执行记录${NC}"
     echo ""
-    echo -e "  完成: ${GREEN}$done${NC}  |  失败: ${RED}$failed${NC}  |  进行中: ${YELLOW}$in_progress${NC}  |  待执行: ${BLUE}$pending${NC}"
+    local hist_line="  完成: ${GREEN}$done${NC}  |  失败: ${RED}$failed${NC}  |  进行中: ${YELLOW}$in_progress${NC}  |  待执行: ${BLUE}$pending${NC}"
+    [ "$skipped" -gt 0 ] && hist_line="${hist_line}  |  跳过: ${YELLOW}$skipped${NC}"
+    echo -e "$hist_line"
     echo ""
 
     if [ "$pending" -gt 0 ] || [ "$in_progress" -gt 0 ]; then
         # 还有未完成任务
         echo -e "  ${BOLD}1)${NC} 继续执行 — 从上次中断处继续 ${DIM}(剩余 $((pending + in_progress)) 个)${NC}"
         echo -e "  ${BOLD}2)${NC} 全部重置 — 清空所有记录，从头开始"
-        [ "$failed" -gt 0 ] && echo -e "  ${BOLD}3)${NC} 仅重试失败 — 重置 $failed 个失败任务"
+        [ "$failed_or_skipped" -gt 0 ] && echo -e "  ${BOLD}3)${NC} 仅重试失败 — 重置 $failed_or_skipped 个失败/跳过的任务"
         echo -e "  ${BOLD}q)${NC} 退出"
         echo ""
         while true; do
-            echo -ne "  请选择 [1/2$([ "$failed" -gt 0 ] && echo '/3')/q]: "
+            echo -ne "  请选择 [1/2$([ "$failed_or_skipped" -gt 0 ] && echo '/3')/q]: "
             read -r choice
             case "$choice" in
                 1) echo -e "  ${CYAN}-> 继续执行${NC}"; return 0 ;;
                 2) reset_all_tasks; echo -e "  ${CYAN}-> 已重置全部任务${NC}"; return 0 ;;
-                3) [ "$failed" -gt 0 ] && { reset_failed_tasks; echo -e "  ${CYAN}-> 已重置 $failed 个失败任务${NC}"; return 0; }; echo -e "  ${RED}无效选择${NC}" ;;
+                3) [ "$failed_or_skipped" -gt 0 ] && { reset_failed_tasks; echo -e "  ${CYAN}-> 已重置 $failed_or_skipped 个失败/跳过的任务${NC}"; return 0; }; echo -e "  ${RED}无效选择${NC}" ;;
                 q|Q) exit 0 ;;
                 *) echo -e "  ${RED}无效选择${NC}" ;;
             esac
@@ -526,15 +568,15 @@ prompt_history_action() {
         echo -e "  所有任务都已处理完毕。"
         echo ""
         echo -e "  ${BOLD}1)${NC} 全部重置 — 重新执行全部任务"
-        [ "$failed" -gt 0 ] && echo -e "  ${BOLD}2)${NC} 仅重试失败 — 重置 $failed 个失败任务"
+        [ "$failed_or_skipped" -gt 0 ] && echo -e "  ${BOLD}2)${NC} 仅重试失败 — 重置 $failed_or_skipped 个失败/跳过的任务"
         echo -e "  ${BOLD}q)${NC} 退出"
         echo ""
         while true; do
-            echo -ne "  请选择 [1$([ "$failed" -gt 0 ] && echo '/2')/q]: "
+            echo -ne "  请选择 [1$([ "$failed_or_skipped" -gt 0 ] && echo '/2')/q]: "
             read -r choice
             case "$choice" in
                 1) reset_all_tasks; echo -e "  ${CYAN}-> 已重置全部任务${NC}"; return 0 ;;
-                2) [ "$failed" -gt 0 ] && { reset_failed_tasks; echo -e "  ${CYAN}-> 已重置 $failed 个失败任务${NC}"; return 0; }; echo -e "  ${RED}无效选择${NC}" ;;
+                2) [ "$failed_or_skipped" -gt 0 ] && { reset_failed_tasks; echo -e "  ${CYAN}-> 已重置 $failed_or_skipped 个失败/跳过的任务${NC}"; return 0; }; echo -e "  ${RED}无效选择${NC}" ;;
                 q|Q) exit 0 ;;
                 *) echo -e "  ${RED}无效选择${NC}" ;;
             esac
@@ -580,7 +622,41 @@ case "${1:-}" in
     --reset-all-failed)
         check_prerequisites
         reset_failed_tasks
-        echo -e "${GREEN}  所有失败任务已重置${NC}"
+        echo -e "${GREEN}  所有失败/跳过的任务已重置${NC}"
+        exit 0
+        ;;
+    --mark-done)
+        check_prerequisites
+        [ -z "${2:-}" ] && { echo -e "${RED}用法: ./run-figma-impl.sh --mark-done <task_id>${NC}"; exit 1; }
+        if ! [[ "${2}" =~ ^[0-9]+$ ]]; then
+            echo -e "${RED}  错误: task_id 必须是数字，收到: '${2}'${NC}"
+            exit 1
+        fi
+        # 检查任务是否存在
+        if ! jq -e --argjson id "$2" '[.[] | select(.id == $id)] | length > 0' "$TASKS_FILE" &>/dev/null; then
+            echo -e "${RED}  错误: 未找到 ID 为 $2 的任务${NC}"
+            exit 1
+        fi
+        # 检查任务状态必须是 failed 或 skipped
+        mark_status=$(jq -r --argjson id "$2" '[.[] | select(.id == $id)][0].status' "$TASKS_FILE")
+        if [ "$mark_status" != "failed" ] && [ "$mark_status" != "skipped" ]; then
+            echo -e "${RED}  错误: 任务 #$2 状态为 '$mark_status'，只能对 failed/skipped 任务使用 --mark-done${NC}"
+            exit 1
+        fi
+        # 标记为 done
+        jq --argjson id "$2" \
+            'map(if .id == $id then .status = "done" | .verifyPassed = false | .lastError = "" | .completedAt = (now | strftime("%Y-%m-%dT%H:%M:%SZ")) else . end)' \
+            "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+        echo -e "${GREEN}  任务 #$2 已标记为完成${NC}"
+        # 将因此任务失败而被 skipped 的下游任务恢复为 pending
+        restored=$(jq --argjson id "$2" '[.[] | select(.status == "skipped") | select(.lastError | contains("#\($id)"))] | length' "$TASKS_FILE" 2>/dev/null || echo "0")
+        if [ "$restored" -gt 0 ]; then
+            jq --argjson id "$2" \
+                'map(if (.status == "skipped") and (.lastError | contains("#\($id)")) then .status = "pending" | .lastError = "" else . end)' \
+                "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+            echo -e "${GREEN}  已恢复 $restored 个被跳过的下游任务${NC}"
+        fi
+        print_status
         exit 0
         ;;
     --help|-h)
@@ -592,7 +668,8 @@ figma-impl harness — 循环执行 Figma 设计稿实现任务
   ./run-figma-impl.sh --status           查看任务状态
   ./run-figma-impl.sh --dry-run          预览执行计划
   ./run-figma-impl.sh --reset <id>       重置指定任务
-  ./run-figma-impl.sh --reset-all-failed 重置所有失败任务
+  ./run-figma-impl.sh --reset-all-failed 重置所有失败/跳过的任务
+  ./run-figma-impl.sh --mark-done <id>   手动标记任务为完成（恢复下游）
   ./run-figma-impl.sh --help             显示帮助
 
 Ctrl+C 可随时中断，进度自动保存。
@@ -639,6 +716,12 @@ while has_remaining_tasks; do
     ROUND=$((ROUND + 1))
     NEXT_TASK=$(get_next_task_name)
 
+    # 获取当前任务 ID（用于失败传播）
+    NEXT_TASK_ID=""
+    if [ -n "$NEXT_TASK" ]; then
+        NEXT_TASK_ID=$(jq -r --arg name "$NEXT_TASK" '[.[] | select(.name == $name)][0].id // empty' "$TASKS_FILE")
+    fi
+
     # 计算进度
     read_task_counts
     TOTAL=$TC_TOTAL
@@ -665,7 +748,7 @@ while has_remaining_tasks; do
 
     # 读取配置值用于 prompt
     MAX_RETRIES=$(jq -r '.maxRetries // 5' "$CONFIG_FILE")
-    SCREENSHOT_WAIT=$(jq -r '.screenshotWaitMs // 3000' "$CONFIG_FILE")
+    SCREENSHOT_WAIT=$(jq -r '.screenshotWaitMs // 10000' "$CONFIG_FILE")
     DEV_URL=$(jq -r '.devServerUrl // ""' "$CONFIG_FILE")
     VERIFY_THRESHOLD=$(jq -r '.verifyThreshold // 80' "$CONFIG_FILE")
     REVIEW_THRESHOLD=$(jq -r '.reviewThreshold // 80' "$CONFIG_FILE")
@@ -1044,6 +1127,7 @@ Dev Server URL: ${DEV_URL}
         echo -e "${RED}  -> 实现超时: $NEXT_TASK (${SESSION_TIMEOUT}s 上限)  耗时: ${IMPL_ELAPSED_STR}${NC}"
         jq 'map(if .status == "in_progress" then .status = "failed" | .lastError = "实现会话超时" else . end)' \
             "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+        [ -n "$NEXT_TASK_ID" ] && propagate_failure "$NEXT_TASK_ID"
         if has_remaining_tasks && ! $INTERRUPTED; then
             echo -e "${DIM}  3s 后开始下一轮...${NC}"
             sleep 3
@@ -1066,6 +1150,7 @@ Dev Server URL: ${DEV_URL}
         echo -e "${YELLOW}  -> 实现阶段未正常结束  耗时: ${IMPL_ELAPSED_STR}${NC}"
         jq 'map(if .status == "in_progress" then .status = "failed" | .lastError = "实现阶段异常退出" else . end)' \
             "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+        [ -n "$NEXT_TASK_ID" ] && propagate_failure "$NEXT_TASK_ID"
         if has_remaining_tasks && ! $INTERRUPTED; then
             echo -e "${DIM}  3s 后开始下一轮...${NC}"
             sleep 3
@@ -1368,6 +1453,7 @@ ${SCORES_CONTEXT}
             "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
 
         echo -e "${RED}  -> 失败: $NEXT_TASK (验证未通过, 重试 ${RETRY_COUNT}/${MAX_RETRIES})  耗时: ${TOTAL_ELAPSED_STR}${NC}"
+        [ -n "$NEXT_TASK_ID" ] && propagate_failure "$NEXT_TASK_ID"
     fi
 
     # 短暂暂停
