@@ -670,7 +670,7 @@ while has_remaining_tasks; do
     if $IS_DESIGN_TASK; then
         # ── Prompt A: Figma 设计稿实现 ──────────────────────────
         IMPL_PROMPT="你现在处于 figma-impl 的 harness 执行阶段，负责实现一个 Figma 设计稿功能。
-你只需要完成代码实现，不需要做视觉验证（验证由独立会话完成）。
+你需要完成代码实现，并做一次快速视觉自检修复明显问题（精确验证由独立会话完成）。
 
 当前任务: ${NEXT_TASK}
 Dev Server URL: ${DEV_URL}
@@ -692,14 +692,24 @@ ${COMMON_INIT_STEPS}
 4. 确保代码可编译运行，无 TypeScript/ESLint 错误
 5. 如果 Figma 返回了 Code Connect 映射，优先使用对应的已有组件
 
-### Step 5: 写入结果
-确认代码已编写完成、可编译后，将结果写入 .claude/impl-result.json：
+### Step 5: 快速自检（不打分，只修明显问题）
+代码编写完成后，做一次快速视觉自检：
+1. 使用 Chrome DevTools MCP 的 navigate_page 导航到目标页面（Dev Server URL: ${DEV_URL}）
+2. 等待页面加载完成（等待 ${SCREENSHOT_WAIT} 毫秒）
+3. 使用 take_screenshot 截取当前实现的截图
+4. 与 Step 3 获取的 Figma 设计稿截图做快速对比
+5. 如果发现明显差异（元素缺失、布局方向错误、颜色明显不对、文字内容错误），立即修复
+6. 修复后重复截图对比，直到无明显问题
+⚠️ 注意：这里只修「一眼能看出来的问题」，不需要采集 CSS 值、不需要逐维度打分、不需要写报告。精确验证由后续独立验证会话完成。
+
+### Step 6: 写入结果
+确认代码已编写完成、自检无明显问题后，将结果写入 .claude/impl-result.json：
 - 实现完成：写入 {\"status\": \"done\"}
 - 无可执行任务：写入 {\"status\": \"no_task\"}
 
 ## 注意事项
 - 不修改任务定义：只能修改 status 字段（设为 in_progress），不要改 name、figmaUrl 等定义字段
-- 不要做视觉验证、不要截图对比、不要修改 verifyPassed 或 retryCount
+- 自检只修明显问题，不要做完整的逐维度评分验证，不要修改 verifyPassed 或 retryCount
 - 不要 git commit（由 harness 在验证通过后统一处理）
 - 必须将结果写入 .claude/impl-result.json，harness 通过该文件判断会话结果"
 
