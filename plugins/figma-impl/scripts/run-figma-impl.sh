@@ -753,6 +753,7 @@ while has_remaining_tasks; do
     VERIFY_THRESHOLD=$(jq -r '.verifyThreshold // 80' "$CONFIG_FILE")
     REVIEW_THRESHOLD=$(jq -r '.reviewThreshold // 80' "$CONFIG_FILE")
     DIMENSION_THRESHOLD=$(jq -r '.dimensionThreshold // 6' "$CONFIG_FILE")
+    SCORE_DROP_TOLERANCE=$(jq -r '.scoreDropTolerance // 3' "$CONFIG_FILE")
 
     # 判断任务类型
     IS_DESIGN_TASK=true
@@ -1169,6 +1170,9 @@ Dev Server URL: ${DEV_URL}
     TOTAL_VERIFY_ELAPSED=0
     LAST_DIFFERENCES=""
     LAST_SCORES_JSON=""  # 上一轮评分 JSON，用于传递给修复会话
+    BEST_SCORE=-1        # 历史最高分，用于回滚判断
+    BEST_SCORES_JSON=""  # 历史最高分对应的维度评分
+    ROLLBACK_COUNT=0     # 回滚次数统计
 
     # 根据任务类型选择结果文件和标签
     if $IS_DESIGN_TASK; then
@@ -1288,6 +1292,48 @@ ${LAST_DIFFERENCES}
             break
         fi
 
+        # ── 分数回滚检测（修复轮次才检查，首轮跳过）──
+        if [ "$RETRY_COUNT" -gt 0 ] && [ "$BEST_SCORE" -ge 0 ] && [ -n "$TOTAL_SCORE" ]; then
+            SCORE_DROP=$((BEST_SCORE - TOTAL_SCORE))
+            # 检查已达标维度是否跌破阈值
+            DIM_REGRESSED=false
+            if [ -n "$BEST_SCORES_JSON" ] && [ -n "$LAST_SCORES_JSON" ]; then
+                DIM_REGRESSED=$(jq -r --argjson best "$BEST_SCORES_JSON" --argjson dimTh "$DIMENSION_THRESHOLD" '
+                  . as $cur | $best | to_entries | map(
+                    select(.value >= $dimTh and ($cur[.key] // .value) < $dimTh)
+                  ) | length > 0
+                ' <<< "$LAST_SCORES_JSON" 2>/dev/null || echo "false")
+            fi
+
+            SHOULD_ROLLBACK=false
+            ROLLBACK_REASON=""
+            if [ "$SCORE_DROP" -gt "$SCORE_DROP_TOLERANCE" ]; then
+                SHOULD_ROLLBACK=true
+                ROLLBACK_REASON="总分下降 ${SCORE_DROP} 分（${BEST_SCORE}→${TOTAL_SCORE}，容忍度 ${SCORE_DROP_TOLERANCE}）"
+            elif [ "$DIM_REGRESSED" = "true" ]; then
+                SHOULD_ROLLBACK=true
+                ROLLBACK_REASON="已达标维度跌破阈值 ${DIMENSION_THRESHOLD}"
+            fi
+
+            if [ "$SHOULD_ROLLBACK" = "true" ] && git tag -l "figma-impl-checkpoint" | grep -q .; then
+                echo -e "  ${RED}[回滚]${NC} ${ROLLBACK_REASON}，回滚到修复前状态"
+                git checkout -- . 2>/dev/null
+                git clean -fd 2>/dev/null
+                git checkout "figma-impl-checkpoint" -- . 2>/dev/null
+                ROLLBACK_COUNT=$((ROLLBACK_COUNT + 1))
+                # 回滚后恢复到最佳分数时的评分状态
+                LAST_SCORES_JSON="$BEST_SCORES_JSON"
+                TOTAL_SCORE="$BEST_SCORE"
+                echo -e "  ${YELLOW}  已回滚（本任务第 ${ROLLBACK_COUNT} 次回滚），分数恢复为 ${BEST_SCORE}%${NC}"
+            fi
+        fi
+
+        # 更新历史最高分
+        if [ -n "$TOTAL_SCORE" ] && [ "$TOTAL_SCORE" -gt "$BEST_SCORE" ]; then
+            BEST_SCORE="$TOTAL_SCORE"
+            BEST_SCORES_JSON="$LAST_SCORES_JSON"
+        fi
+
         # 未通过：递增 retryCount
         RETRY_COUNT=$((RETRY_COUNT + 1))
         jq --argjson rc "$RETRY_COUNT" \
@@ -1299,6 +1345,10 @@ ${LAST_DIFFERENCES}
         if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
             break
         fi
+
+        # ── 修复前打 git checkpoint ──
+        git add -A 2>/dev/null
+        git tag -f "figma-impl-checkpoint" 2>/dev/null
 
         # 生成修复 prompt，根据任务类型注入不同内容
         echo -e "  ${CYAN}[修复阶段]${NC} 启动修复会话..."
@@ -1420,6 +1470,9 @@ ${SCORES_CONTEXT}
 
     done  # end verify/fix loop
 
+    # 清理 checkpoint tag
+    git tag -d "figma-impl-checkpoint" 2>/dev/null || true
+
     $INTERRUPTED && break
 
     # 格式化总耗时
@@ -1445,7 +1498,9 @@ ${SCORES_CONTEXT}
             fi
         fi
 
-        echo -e "${GREEN}  -> 完成: $NEXT_TASK  耗时: ${TOTAL_ELAPSED_STR}  重试: ${RETRY_COUNT}${NC}"
+        ROLLBACK_INFO=""
+        [ "$ROLLBACK_COUNT" -gt 0 ] && ROLLBACK_INFO="  回滚: ${ROLLBACK_COUNT}"
+        echo -e "${GREEN}  -> 完成: $NEXT_TASK  耗时: ${TOTAL_ELAPSED_STR}  重试: ${RETRY_COUNT}${ROLLBACK_INFO}${NC}"
     else
         # 验证失败：标记 failed
         ESCAPED_DIFF=$(echo "$LAST_DIFFERENCES" | head -c 500 | jq -Rs .)

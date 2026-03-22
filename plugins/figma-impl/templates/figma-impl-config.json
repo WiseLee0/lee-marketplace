@@ -7,5 +7,6 @@
   "verifyThreshold": 80,
   "reviewThreshold": 80,
   "dimensionThreshold": 6,
+  "scoreDropTolerance": 3,
   "sessionTimeout": 600
 }
