@@ -242,7 +242,7 @@ start_dev_server() {
 
     echo -e "  ${CYAN}启动 dev server: $dev_cmd${NC}"
     # 后台启动 dev server（输出到日志文件，避免 /dev/null 导致某些框架阻塞）
-    $dev_cmd > "$DEV_SERVER_LOG" 2>&1 &
+    eval "$dev_cmd" > "$DEV_SERVER_LOG" 2>&1 &
     DEV_SERVER_PID=$!
 
     # 等待 dev server 启动
@@ -335,19 +335,30 @@ stop_dev_server() {
 }
 
 get_task_counts() {
-    local total pending in_progress done failed
-    total=$(jq 'length' "$TASKS_FILE")
-    pending=$(jq '[.[] | select(.status == "pending")] | length' "$TASKS_FILE")
-    in_progress=$(jq '[.[] | select(.status == "in_progress")] | length' "$TASKS_FILE")
-    done=$(jq '[.[] | select(.status == "done")] | length' "$TASKS_FILE")
-    failed=$(jq '[.[] | select(.status == "failed")] | length' "$TASKS_FILE")
-    echo "$total $pending $in_progress $done $failed"
+    jq -r '[
+        length,
+        ([.[] | select(.status == "pending")] | length),
+        ([.[] | select(.status == "in_progress")] | length),
+        ([.[] | select(.status == "done")] | length),
+        ([.[] | select(.status == "failed")] | length)
+    ] | join(" ")' "$TASKS_FILE"
+}
+
+# 解析 get_task_counts 输出到独立变量
+# 用法: read_task_counts; 之后可用 $TC_TOTAL $TC_PENDING 等
+read_task_counts() {
+    local counts_str
+    counts_str=$(get_task_counts)
+    TC_TOTAL=$(echo "$counts_str" | cut -d' ' -f1)
+    TC_PENDING=$(echo "$counts_str" | cut -d' ' -f2)
+    TC_IN_PROGRESS=$(echo "$counts_str" | cut -d' ' -f3)
+    TC_DONE=$(echo "$counts_str" | cut -d' ' -f4)
+    TC_FAILED=$(echo "$counts_str" | cut -d' ' -f5)
 }
 
 print_status() {
-    local counts
-    counts=($(get_task_counts))
-    local total=${counts[0]} pending=${counts[1]} in_progress=${counts[2]} done=${counts[3]} failed=${counts[4]}
+    read_task_counts
+    local total=$TC_TOTAL pending=$TC_PENDING in_progress=$TC_IN_PROGRESS done=$TC_DONE failed=$TC_FAILED
 
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BOLD}  Figma Impl — 任务状态${NC}"
@@ -431,6 +442,12 @@ reset_failed_tasks() {
 run_claude_session() {
     local prompt="$1"
     SECONDS=0
+    RCS_TIMED_OUT=false
+
+    # 使用标记文件判断超时，避免 PID 复用导致误判
+    local timeout_marker
+    timeout_marker=$(mktemp "${TMPDIR:-/tmp}/figma-impl-timeout.XXXXXX")
+    rm -f "$timeout_marker"
 
     claude --dangerously-skip-permissions \
         -p "$prompt" \
@@ -440,6 +457,7 @@ run_claude_session() {
     (
       sleep "$SESSION_TIMEOUT" 2>/dev/null
       if kill -0 "$CLAUDE_PID" 2>/dev/null; then
+        touch "$timeout_marker"
         kill "$CLAUDE_PID" 2>/dev/null
       fi
     ) &
@@ -448,11 +466,19 @@ run_claude_session() {
     wait "$CLAUDE_PID" 2>/dev/null || true
     local _exit_code=$?
     CLAUDE_PID=""
-    if [ -n "$TIMEOUT_PID" ] && kill -0 "$TIMEOUT_PID" 2>/dev/null; then
+
+    # 清理超时监控进程
+    if [ -n "$TIMEOUT_PID" ]; then
         kill "$TIMEOUT_PID" 2>/dev/null || true
         wait "$TIMEOUT_PID" 2>/dev/null || true
     fi
     TIMEOUT_PID=""
+
+    # 通过标记文件判断是否超时
+    if [ -f "$timeout_marker" ]; then
+        RCS_TIMED_OUT=true
+    fi
+    rm -f "$timeout_marker"
 
     RCS_ELAPSED=$SECONDS
     RCS_EXIT_CODE=$_exit_code
@@ -463,9 +489,8 @@ run_claude_session() {
 # ============================================================
 
 prompt_history_action() {
-    local counts
-    counts=($(get_task_counts))
-    local total=${counts[0]} pending=${counts[1]} in_progress=${counts[2]} done=${counts[3]} failed=${counts[4]}
+    read_task_counts
+    local total=$TC_TOTAL pending=$TC_PENDING in_progress=$TC_IN_PROGRESS done=$TC_DONE failed=$TC_FAILED
 
     # 全部 pending，首次运行，直接开始
     if [ "$done" -eq 0 ] && [ "$failed" -eq 0 ] && [ "$in_progress" -eq 0 ]; then
@@ -615,9 +640,9 @@ while has_remaining_tasks; do
     NEXT_TASK=$(get_next_task_name)
 
     # 计算进度
-    local_counts=($(get_task_counts))
-    TOTAL=${local_counts[0]}
-    DONE_COUNT=${local_counts[3]}
+    read_task_counts
+    TOTAL=$TC_TOTAL
+    DONE_COUNT=$TC_DONE
 
     if [ -z "$NEXT_TASK" ]; then
         echo -e "${YELLOW}  所有待执行任务的依赖尚未满足，无法继续。${NC}"
@@ -1015,7 +1040,7 @@ Dev Server URL: ${DEV_URL}
     fi
 
     # 实现阶段超时检测
-    if [ "$RCS_EXIT_CODE" -eq 124 ]; then
+    if $RCS_TIMED_OUT; then
         echo -e "${RED}  -> 实现超时: $NEXT_TASK (${SESSION_TIMEOUT}s 上限)  耗时: ${IMPL_ELAPSED_STR}${NC}"
         jq 'map(if .status == "in_progress" then .status = "failed" | .lastError = "实现会话超时" else . end)' \
             "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
@@ -1057,7 +1082,7 @@ Dev Server URL: ${DEV_URL}
     TASK_PASSED=false
     TOTAL_VERIFY_ELAPSED=0
     LAST_DIFFERENCES=""
-    LAST_SCORES_JSON=""  # 上一轮评分 JSON，用于传递给验证和修复会话
+    LAST_SCORES_JSON=""  # 上一轮评分 JSON，用于传递给修复会话
 
     # 根据任务类型选择结果文件和标签
     if $IS_DESIGN_TASK; then
@@ -1083,20 +1108,14 @@ Dev Server URL: ${DEV_URL}
 
         # 构建本轮验证 prompt（如果有上一轮评分，追加基线信息）
         CURRENT_VERIFY_PROMPT="$VERIFY_PROMPT"
-        if [ -n "$LAST_SCORES_JSON" ] && [ "$RETRY_COUNT" -gt 0 ]; then
+        if [ -n "$LAST_DIFFERENCES" ] && [ "$RETRY_COUNT" -gt 0 ]; then
             CURRENT_VERIFY_PROMPT="${VERIFY_PROMPT}
 
-## 上一轮评分基线（第 $((RETRY_COUNT)) 次修复前的评分）
+## 上一轮发现的问题（第 $((RETRY_COUNT)) 次修复前）
 
-上一轮各维度评分: ${LAST_SCORES_JSON}
-上一轮发现的问题:
 ${LAST_DIFFERENCES}
 
-⚠️ 评分一致性要求：
-- 如果某个维度的实现与上一轮相比没有变化，该维度的评分应与上一轮保持一致（允许 ±1 分浮动）
-- 如果修复引入了新问题（回归），对应维度应扣分并在差异中明确标注为「回归」
-- 只有实际改善的维度才应提高分数，只有实际恶化的维度才应降低分数
-- 不要因为本轮是重新评估就整体偏高或偏低，保持客观一致"
+请独立评估当前实现，重点检查以上问题是否已修复，以及修复是否引入了新的回归问题。"
         fi
 
         # 运行验证/审查会话（每次前清理旧结果）
@@ -1108,7 +1127,7 @@ ${LAST_DIFFERENCES}
         $INTERRUPTED && break
 
         # 超时处理
-        if [ "$RCS_EXIT_CODE" -eq 124 ]; then
+        if $RCS_TIMED_OUT; then
             echo -e "${RED}  -> ${STAGE_LABEL}超时  ${NC}"
             RETRY_COUNT=$((RETRY_COUNT + 1))
             jq --argjson rc "$RETRY_COUNT" \
@@ -1168,7 +1187,7 @@ ${LAST_DIFFERENCES}
                 ' "$RESULT_FILE"
             fi
             echo -e "    ${BOLD}总分: ${TOTAL_SCORE}%${NC} (阈值: ${CURRENT_THRESHOLD}%)"
-            if [ -n "$FAILED_DIMS" ] && [ "$FAILED_DIMS" != "" ]; then
+            if [ -n "$FAILED_DIMS" ]; then
                 echo -e "    ${RED}未达标维度: ${FAILED_DIMS}${NC}"
             fi
         else
@@ -1305,7 +1324,7 @@ ${SCORES_CONTEXT}
 
         $INTERRUPTED && break
 
-        if [ "$RCS_EXIT_CODE" -eq 124 ]; then
+        if $RCS_TIMED_OUT; then
             echo -e "${RED}  -> 修复超时${NC}"
         elif [ -f "$FIX_RESULT_FILE" ] && [ "$(jq -r '.status // ""' "$FIX_RESULT_FILE" 2>/dev/null)" = "done" ]; then
             echo -e "${GREEN}  -> 修复完成${NC}"
@@ -1333,7 +1352,11 @@ ${SCORES_CONTEXT}
 
         # git commit（提交所有变更，含 figma-tasks.json 的状态更新）
         if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-            git add -A && git commit -m "feat: 实现 ${NEXT_TASK} - Figma设计稿还原" 2>/dev/null || true
+            if $IS_DESIGN_TASK; then
+                git add -A && git commit -m "feat: 实现 ${NEXT_TASK} - Figma设计稿还原" 2>/dev/null || true
+            else
+                git add -A && git commit -m "feat: 实现 ${NEXT_TASK}" 2>/dev/null || true
+            fi
         fi
 
         echo -e "${GREEN}  -> 完成: $NEXT_TASK  耗时: ${TOTAL_ELAPSED_STR}  重试: ${RETRY_COUNT}${NC}"
