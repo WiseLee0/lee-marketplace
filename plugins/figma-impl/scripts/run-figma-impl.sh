@@ -824,14 +824,31 @@ ${COMMON_INIT_STEPS}
 - 必须将结果写入 .claude/impl-result.json，harness 通过该文件判断会话结果"
 
         # ── Prompt B: 视觉验证 ──────────────────────────────────
-        VERIFY_PROMPT="你是一个严格的视觉 QA 审查员。你的工作是对比 Figma 设计稿和实际实现的截图，找出所有差异。
+        VERIFY_PROMPT="你是一个严格的视觉 QA 审查员。你的工作是对比 Figma 设计稿和实际实现，找出所有差异。
 你不是实现者，你没有写这些代码，你对它没有感情。你的目标是找出问题，而不是找理由通过。
 
 ⚠️ 审查原则：
-- 宁可误判为不通过，也不要放过差异
 - 不要为实现者找借口（如「细微差异可以接受」「整体还原度不错」）
 - 每个维度独立评分，不因其他维度表现好而放宽某个维度的标准
 - 如果某个元素在设计稿中存在但实现中缺失，该维度直接 0 分
+
+📊 验证分两类策略，按维度区别执行：
+
+**A. 数值精确对比**（spacing、colors、typography、borders、shadows）：
+- 必须以 design_context 返回的精确 CSS 数值为准
+- 与 DevTools 采集的 computed style 做数值对比
+- 数值一致即为通过，不受截图视觉观感影响
+- 禁止凭截图推测设计值（如不要因为「看起来像圆形」就判定 border-radius 应更大）
+
+**B. 视觉结构对比**（layout、completeness、icons_images）：
+- 这些维度本质上是结构和存在性判断，design_context 无法提供完整数值
+- 必须依赖设计稿截图与实现截图的视觉对比
+- 此类对比适用「宁严勿松」原则：有疑问时倾向扣分
+
+**C. 兜底规则**：
+- 如果 design_context 中未包含某属性的精确值（如返回的参考代码中没有明确的 px/color 值），可参考截图进行视觉判断
+- 此类判断必须在报告中标注「来源: 截图推测」
+- 截图推测的属性，误差容忍度放宽一倍（如间距允许 ±4px 而非 ±2px）
 
 📐 响应式布局容忍规则：
 设计稿和实现的视口宽度可能不同，对于使用流式/响应式布局的区域（如 flex: 1、百分比宽度、grid auto-fill 等），应遵循以下原则：
@@ -839,7 +856,6 @@ ${COMMON_INIT_STEPS}
 - 间距评分只关注固定间距值（gap、padding、margin）是否正确，不因容器/元素宽度变化而扣分
 - 图片/卡片等流式元素的宽高比应保持一致，但绝对尺寸差异不扣分
 - 文字换行位置可能因容器宽度不同而不同，不应视为差异
-- 仍然严格检查：颜色、字号、字重、圆角、阴影、元素是否缺失等与视口无关的属性
 
 当前任务: ${NEXT_TASK}
 Dev Server URL: ${DEV_URL}
@@ -850,8 +866,10 @@ Dev Server URL: ${DEV_URL}
 
 ### Step 1: 获取 Figma 设计基准
 1. 读取 .claude/figma-tasks.json 获取当前任务信息（figmaUrl 中的 fileKey 和 nodeId）
-2. 调用 Figma MCP 的 figma__get_screenshot，传入 fileKey 和 nodeId，获取设计稿截图
-3. **保存设计稿截图**：使用 figma__get_screenshot 的结果，通过 Bash 工具将截图保存到 ${DESIGN_SCREENSHOT}
+2. 调用 Figma MCP 的 figma__get_design_context，传入 fileKey 和 nodeId，获取设计上下文
+3. **提取设计数值清单**：从 design_context 返回的参考代码中，提取所有明确的 CSS 数值（颜色、间距、字号、圆角等），记录为「设计基准值表」。注意：design_context 返回的是参考代码，不一定包含所有属性——只记录明确给出的值
+4. 调用 Figma MCP 的 figma__get_screenshot，传入 fileKey 和 nodeId，获取设计稿截图
+5. **保存设计稿截图**：通过 Bash 工具将截图保存到 ${DESIGN_SCREENSHOT}
 
 ### Step 2: 截取实现截图
 1. Dev server 已由 harness 脚本启动，无需你再启动
@@ -860,28 +878,46 @@ Dev Server URL: ${DEV_URL}
 4. **保存实现截图**：使用 Chrome DevTools MCP 的 take_screenshot，将截图保存到 ${IMPL_SCREENSHOT}（传入 filePath 参数）
 
 ### Step 3: 使用 DevTools 采集实际 CSS 值
-在截图后，使用 Chrome DevTools MCP 对关键元素进行精确检查：
-1. 使用 take_snapshot 获取页面结构
-2. 对设计稿中的关键元素（标题、按钮、卡片、容器等），使用 evaluate_script 获取其 computed style：
-   - 字号、字重、行高、颜色
-   - padding、margin、gap
-   - border-radius、border-width、box-shadow
-   - background-color、width、height
-3. 将采集到的实际 CSS 值记录下来，用于精确对比
+针对 Step 1 中提取的「设计基准值表」，采集对应元素的 computed style：
+
+1. 使用 take_snapshot 获取页面 a11y 树，识别关键元素的 uid
+2. 对每个需要验证的元素，使用 evaluate_script 批量采集 computed style。推荐使用以下模式一次采集多个属性：
+   \`\`\`
+   (el) => {
+     const s = getComputedStyle(el);
+     return {
+       fontSize: s.fontSize, fontWeight: s.fontWeight, lineHeight: s.lineHeight,
+       color: s.color, backgroundColor: s.backgroundColor,
+       padding: s.padding, margin: s.margin, gap: s.gap,
+       borderRadius: s.borderRadius, boxShadow: s.boxShadow
+     };
+   }
+   \`\`\`
+3. **只采集设计基准值表中有对应值的属性**，不需要盲目采集所有属性
+4. 将 computed style 中的 rgb() 值转换为 hex 格式，以便与设计值对比
 
 ### Step 4: 逐项对比评分
-对以下每个维度独立打分（0-10 分），并列出具体差异。每个维度有不同权重，影响总分计算：
+对以下每个维度独立打分（0-10 分），并列出具体差异。
 
-| 维度 | 权重 | 评分标准 |
-|------|------|---------|
-| layout | 2.0 | 整体布局结构是否一致（flex/grid方向、嵌套层级、元素排列顺序） |
-| spacing | 1.5 | padding/margin/gap 是否匹配（允许 ±2px 误差） |
-| colors | 1.5 | 背景色、文字色、边框色、渐变是否匹配 |
-| typography | 1.0 | 字号、字重、行高、字体是否匹配 |
-| borders | 0.5 | 圆角、边框宽度、边框样式是否匹配 |
-| shadows | 0.5 | 阴影是否匹配（包括无阴影 vs 有阴影） |
-| icons_images | 1.0 | 图标/图片是否存在、尺寸是否正确、位置是否正确 |
-| completeness | 2.0 | 设计稿中所有元素是否都已实现（无遗漏） |
+⚠️ 对比方法因维度类型而异：
+
+**数值精确对比维度**（design_context 数值 vs computed style）：
+
+| 维度 | 权重 | 评分标准 | 对比方法 |
+|------|------|---------|---------|
+| spacing | 1.5 | padding/margin/gap 是否匹配 | 数值对比，允许 ±2px 误差（截图推测值允许 ±4px） |
+| colors | 1.5 | 背景色、文字色、边框色、渐变是否匹配 | hex/rgb 数值对比 |
+| typography | 1.0 | 字号、字重、行高、字体是否匹配 | 数值对比 |
+| borders | 0.5 | 圆角、边框宽度、边框样式是否匹配 | 数值对比 |
+| shadows | 0.5 | 阴影是否匹配（包括无阴影 vs 有阴影） | 数值对比 |
+
+**视觉结构对比维度**（设计稿截图 vs 实现截图）：
+
+| 维度 | 权重 | 评分标准 | 对比方法 |
+|------|------|---------|---------|
+| layout | 2.0 | 整体布局结构是否一致（flex/grid方向、嵌套层级、元素排列顺序） | 截图视觉对比 + a11y 树结构验证 |
+| icons_images | 1.0 | 图标/图片是否存在、尺寸是否正确、位置是否正确 | 截图视觉对比 |
+| completeness | 2.0 | 设计稿中所有元素是否都已实现（无遗漏） | 截图视觉对比，逐元素核对 |
 
 ### Step 5: 写入验证结果和详细分析
 
@@ -903,9 +939,9 @@ Dev Server URL: ${DEV_URL}
   \"total_score\": 75,
   \"failed_dimensions\": [\"spacing\", \"icons_images\"],
   \"differences\": [
-    \"间距: 卡片之间的 gap 设计稿为 16px，实现为 24px\",
-    \"图标: 右上角的关闭按钮图标缺失\",
-    \"颜色: 标题文字色设计稿为 #1A1A1A，实现为 #333333\"
+    \"间距: 卡片之间的 gap 设计稿为 16px，实现为 24px [来源: design_context]\",
+    \"图标: 右上角的关闭按钮图标缺失 [来源: 截图对比]\",
+    \"颜色: 标题文字色设计稿为 #1A1A1A，实现为 #333333 [来源: design_context]\"
   ]
 }
 
@@ -920,10 +956,18 @@ Dev Server URL: ${DEV_URL}
 - fileKey: <fileKey>
 - nodeId: <nodeId>
 
+## 设计基准值表（从 design_context 提取）
+列出从 design_context 中提取到的所有明确 CSS 数值，供修复会话直接参考：
+| 属性 | 设计值 | 对应元素 |
+|------|--------|---------|
+| font-size | 18px | 标题 |
+| gap | 16px | 卡片容器 |
+| ... | ... | ... |
+
 ## 差异清单
 
 ### 差异 1: [维度] 具体问题标题
-- **设计稿值**: <从 Figma 设计上下文获取的值>
+- **设计稿值**: <值> [来源: design_context | 截图推测]
 - **实现实际值**: <从 DevTools computed style 获取的值>
 - **涉及文件**: <文件路径:行号>
 - **涉及选择器/元素**: <CSS 选择器或组件名>
@@ -933,12 +977,12 @@ Dev Server URL: ${DEV_URL}
 （每个差异重复上述格式）
 
 ## DevTools 采集的关键 CSS 值
-| 元素 | 属性 | 设计稿值 | 实际值 | 状态 |
-|------|------|---------|--------|------|
-| .card-title | font-size | 18px | 16px | ❌ |
-| .card-title | color | #1A1A1A | #333333 | ❌ |
-| .card-container | gap | 16px | 24px | ❌ |
-| .card-container | padding | 24px | 24px | ✅ |
+| 元素 | 属性 | 设计稿值 | 实际值 | 来源 | 状态 |
+|------|------|---------|--------|------|------|
+| .card-title | font-size | 18px | 16px | design_context | ❌ |
+| .card-title | color | #1A1A1A | #333333 | design_context | ❌ |
+| .card-container | gap | 16px | 24px | design_context | ❌ |
+| .card-container | padding | 24px | 24px | design_context | ✅ |
 \`\`\`
 
 评分规则：
@@ -947,7 +991,7 @@ Dev Server URL: ${DEV_URL}
   示例: layout=8(×2.0=16) + spacing=6(×1.5=9) + colors=9(×1.5=13.5) + typography=7(×1.0=7) + borders=8(×0.5=4) + shadows=10(×0.5=5) + icons_images=5(×1.0=5) + completeness=7(×2.0=14) = 73.5 → total_score = 74
 - passed = true 当且仅当：total_score >= ${VERIFY_THRESHOLD} 且所有维度 >= ${DIMENSION_THRESHOLD}
 - failed_dimensions: 列出所有 < ${DIMENSION_THRESHOLD} 分的维度
-- differences: 列出所有具体差异，格式为「维度: 具体描述」
+- differences: 列出所有具体差异，格式为「维度: 具体描述 [来源: design_context | 截图对比 | 截图推测]」
 - 必须将结果写入 .claude/verify-result.json，这是唯一的结果传递方式
 - 必须将详细分析写入 ${VERIFY_ANALYSIS_FILE}，这是修复会话获取完整上下文的关键"
 
