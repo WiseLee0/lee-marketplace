@@ -47,6 +47,14 @@ FIX_RESULT_FILE="$CLAUDE_DIR/fix-result.json"
 REVIEW_RESULT_FILE="$CLAUDE_DIR/review-result.json"
 DEV_SERVER_LOG="$CLAUDE_DIR/dev-server.log"
 
+# 跨会话上下文文件
+CONTEXT_DIR="$CLAUDE_DIR/verify-context"
+DESIGN_SCREENSHOT="$CONTEXT_DIR/design-screenshot.png"
+IMPL_SCREENSHOT="$CONTEXT_DIR/impl-screenshot.png"
+VERIFY_ANALYSIS_FILE="$CONTEXT_DIR/verify-analysis.md"
+REVIEW_ANALYSIS_FILE="$CONTEXT_DIR/review-analysis.md"
+FIX_SELFCHECK_SCREENSHOT="$CONTEXT_DIR/fix-selfcheck-screenshot.png"
+
 # ============================================================
 # 中断处理
 # ============================================================
@@ -618,8 +626,10 @@ while has_remaining_tasks; do
         break
     fi
 
-    # 每轮开始前清理上一轮的结果文件
+    # 每轮开始前清理上一轮的结果文件和上下文文件
     rm -f "$IMPL_RESULT_FILE" "$VERIFY_RESULT_FILE" "$FIX_RESULT_FILE" "$REVIEW_RESULT_FILE"
+    rm -rf "$CONTEXT_DIR"
+    mkdir -p "$CONTEXT_DIR"
 
     echo ""
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -714,20 +724,32 @@ ${COMMON_INIT_STEPS}
 当前任务: ${NEXT_TASK}
 Dev Server URL: ${DEV_URL}
 通过阈值: 每项 ≥ 7 分且总分 ≥ ${VERIFY_THRESHOLD}%
+上下文输出目录: ${CONTEXT_DIR}
 
 ## 执行步骤
 
 ### Step 1: 获取 Figma 设计基准
 1. 读取 .claude/figma-tasks.json 获取当前任务信息（figmaUrl 中的 fileKey 和 nodeId）
 2. 调用 Figma MCP 的 figma__get_screenshot，传入 fileKey 和 nodeId，获取设计稿截图
+3. **保存设计稿截图**：使用 figma__get_screenshot 的结果，通过 Bash 工具将截图保存到 ${DESIGN_SCREENSHOT}
 
 ### Step 2: 截取实现截图
 1. Dev server 已由 harness 脚本启动，无需你再启动
 2. 使用 Chrome DevTools MCP 的 navigate_page 导航到目标页面（type=\"url\", url=目标URL）
 3. 等待页面完全加载（等待 ${SCREENSHOT_WAIT} 毫秒，可用 wait_for 等待关键文本出现）
-4. 使用 Chrome DevTools MCP 的 take_screenshot 截取当前实现的截图
+4. **保存实现截图**：使用 Chrome DevTools MCP 的 take_screenshot，将截图保存到 ${IMPL_SCREENSHOT}（传入 filePath 参数）
 
-### Step 3: 逐项对比评分
+### Step 3: 使用 DevTools 采集实际 CSS 值
+在截图后，使用 Chrome DevTools MCP 对关键元素进行精确检查：
+1. 使用 take_snapshot 获取页面结构
+2. 对设计稿中的关键元素（标题、按钮、卡片、容器等），使用 evaluate_script 获取其 computed style：
+   - 字号、字重、行高、颜色
+   - padding、margin、gap
+   - border-radius、border-width、box-shadow
+   - background-color、width、height
+3. 将采集到的实际 CSS 值记录下来，用于精确对比
+
+### Step 4: 逐项对比评分
 对以下每个维度独立打分（0-10 分），并列出具体差异。每个维度有不同权重，影响总分计算：
 
 | 维度 | 权重 | 评分标准 |
@@ -741,7 +763,9 @@ Dev Server URL: ${DEV_URL}
 | icons_images | 1.0 | 图标/图片是否存在、尺寸是否正确、位置是否正确 |
 | completeness | 2.0 | 设计稿中所有元素是否都已实现（无遗漏） |
 
-### Step 4: 写入结果
+### Step 5: 写入验证结果和详细分析
+
+#### 5a. 写入评分结果
 将验证结果写入 .claude/verify-result.json（harness 通过该文件读取评分），格式如下：
 
 {
@@ -765,6 +789,38 @@ Dev Server URL: ${DEV_URL}
   ]
 }
 
+#### 5b. 写入详细分析文件（供修复会话使用）
+将详细分析写入 ${VERIFY_ANALYSIS_FILE}，格式如下：
+
+\`\`\`markdown
+# 视觉验证分析报告
+
+## 设计稿信息
+- Figma URL: <figmaUrl>
+- fileKey: <fileKey>
+- nodeId: <nodeId>
+
+## 差异清单
+
+### 差异 1: [维度] 具体问题标题
+- **设计稿值**: <从 Figma 设计上下文获取的值>
+- **实现实际值**: <从 DevTools computed style 获取的值>
+- **涉及文件**: <文件路径:行号>
+- **涉及选择器/元素**: <CSS 选择器或组件名>
+- **修复建议**: <具体修改建议，如将 gap: 24px 改为 gap: 16px>
+
+### 差异 2: ...
+（每个差异重复上述格式）
+
+## DevTools 采集的关键 CSS 值
+| 元素 | 属性 | 设计稿值 | 实际值 | 状态 |
+|------|------|---------|--------|------|
+| .card-title | font-size | 18px | 16px | ❌ |
+| .card-title | color | #1A1A1A | #333333 | ❌ |
+| .card-container | gap | 16px | 24px | ❌ |
+| .card-container | padding | 24px | 24px | ✅ |
+\`\`\`
+
 评分规则：
 - 各维度权重: layout=2.0, spacing=1.5, colors=1.5, typography=1.0, borders=0.5, shadows=0.5, icons_images=1.0, completeness=2.0（权重总和=10.0）
 - total_score = Σ(维度分数 × 维度权重) / (权重总和 × 10) × 100，四舍五入取整
@@ -772,7 +828,8 @@ Dev Server URL: ${DEV_URL}
 - passed = true 当且仅当：total_score >= ${VERIFY_THRESHOLD} 且所有维度 >= 7
 - failed_dimensions: 列出所有 < 7 分的维度
 - differences: 列出所有具体差异，格式为「维度: 具体描述」
-- 必须将结果写入 .claude/verify-result.json，这是唯一的结果传递方式"
+- 必须将结果写入 .claude/verify-result.json，这是唯一的结果传递方式
+- 必须将详细分析写入 ${VERIFY_ANALYSIS_FILE}，这是修复会话获取完整上下文的关键"
 
     else
         # ── Prompt A': 纯逻辑实现 ──────────────────────────────
@@ -826,6 +883,7 @@ ${COMMON_INIT_STEPS}
 任务描述: ${TASK_DESCRIPTION}
 Dev Server URL: ${DEV_URL}
 通过阈值: 每项 ≥ 7 分且总分 ≥ ${REVIEW_THRESHOLD}%
+上下文输出目录: ${CONTEXT_DIR}
 
 ## 执行步骤
 
@@ -851,7 +909,9 @@ Dev Server URL: ${DEV_URL}
 | type_safety | 1.0 | TypeScript 类型是否正确，有无 any 滥用、类型断言不当 |
 | integration | 1.5 | 与项目现有代码的集成是否合理，是否复用了已有组件/工具 |
 
-### Step 4: 写入结果
+### Step 4: 写入结果和详细分析
+
+#### 4a. 写入评分结果
 将审查结果写入 .claude/review-result.json（harness 通过该文件读取评分），格式如下：
 
 {
@@ -873,13 +933,50 @@ Dev Server URL: ${DEV_URL}
   ]
 }
 
+#### 4b. 写入详细分析文件（供修复会话使用）
+将详细分析写入 ${REVIEW_ANALYSIS_FILE}，格式如下：
+
+\`\`\`markdown
+# 代码审查分析报告
+
+## 任务信息
+- 任务名称: <name>
+- 任务描述: <description>
+
+## 变更文件清单
+- <文件路径1>: <变更摘要>
+- <文件路径2>: <变更摘要>
+
+## 问题清单
+
+### 问题 1: [维度] 具体问题标题
+- **严重程度**: 高/中/低
+- **涉及文件**: <文件路径:行号>
+- **问题代码**:
+  \\\`\\\`\\\`typescript
+  // 当前代码
+  \\\`\\\`\\\`
+- **修复建议**:
+  \\\`\\\`\\\`typescript
+  // 建议修改为
+  \\\`\\\`\\\`
+- **原因说明**: <为什么这是一个问题>
+
+### 问题 2: ...
+（每个问题重复上述格式）
+
+## 已达标维度（无需修改）
+- <维度名>: <分数>/10 — <简要说明>
+\`\`\`
+
 评分规则：
 - 各维度权重: correctness=2.5, completeness=2.0, error_handling=1.5, code_quality=1.5, type_safety=1.0, integration=1.5（权重总和=10.0）
 - total_score = Σ(维度分数 × 维度权重) / (权重总和 × 10) × 100，四舍五入取整
 - passed = true 当且仅当：total_score >= ${REVIEW_THRESHOLD} 且所有维度 >= 7
 - failed_dimensions: 列出所有 < 7 分的维度
 - issues: 列出所有具体问题，格式为「维度: 具体描述」
-- 必须将结果写入 .claude/review-result.json，这是唯一的结果传递方式"
+- 必须将结果写入 .claude/review-result.json，这是唯一的结果传递方式
+- 必须将详细分析写入 ${REVIEW_ANALYSIS_FILE}，这是修复会话获取完整上下文的关键"
 
     fi
 
@@ -1108,58 +1205,80 @@ ${LAST_SCORES_JSON}
 
         if $IS_DESIGN_TASK; then
             FIX_PROMPT="你现在处于 figma-impl 的 harness 执行阶段，需要修复一个 Figma 设计稿实现的视觉差异。
-独立的视觉 QA 审查员已经检查了你的实现，发现以下问题：
+独立的视觉 QA 审查员已经检查了你的实现，并提供了详细的诊断报告。
 
 当前任务: ${NEXT_TASK}
 Dev Server URL: ${DEV_URL}
 当前重试次数: ${RETRY_COUNT}/${MAX_RETRIES}
 ${SCORES_CONTEXT}
-## QA 审查员发现的差异
-
-${LAST_DIFFERENCES}
-
 ## 执行步骤
 
-### Step 1: 理解问题
+### Step 1: 读取完整诊断上下文
 1. 读取 .claude/figma-tasks.json 获取当前任务信息
 2. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范
-3. 调用 Figma MCP 的 figma__get_design_context，传入 fileKey 和 nodeId，重新获取设计上下文
-4. 调用 Figma MCP 的 figma__get_screenshot，传入 fileKey 和 nodeId，获取设计稿截图
-5. 仔细阅读上面列出的每一个差异点
+3. **读取 QA 详细分析报告**: 读取 ${VERIFY_ANALYSIS_FILE}，这是 QA 审查员写的详细分析，包含：
+   - 每个差异的设计稿值 vs 实际值
+   - 涉及的文件路径和行号
+   - 涉及的 CSS 选择器/元素
+   - 具体修复建议
+   - DevTools 采集的实际 CSS 值对照表
+4. **查看设计稿截图**: 读取 ${DESIGN_SCREENSHOT}，了解设计稿的视觉目标
+5. **查看当前实现截图**: 读取 ${IMPL_SCREENSHOT}，了解当前实现的视觉效果
+6. 调用 Figma MCP 的 figma__get_design_context，传入 fileKey 和 nodeId，获取设计上下文中的具体数值
 
-### Step 2: 针对性修复
-针对上述每个差异点逐一修复代码。注意：
-- 只修复上面列出的问题，不要做无关改动
+### Step 2: 使用 DevTools 定位问题元素
+1. 使用 Chrome DevTools MCP 的 navigate_page 导航到目标页面
+2. 使用 take_snapshot 获取页面元素结构
+3. 根据分析报告中的选择器/元素，使用 evaluate_script 检查当前 computed style，确认问题仍然存在
+4. 记录需要修改的精确值
+
+### Step 3: 针对性修复
+根据分析报告逐一修复每个差异点：
+- 按分析报告中的「涉及文件」和「修复建议」定位和修改代码
+- 使用分析报告中的「设计稿值」作为修正目标值
+- 只修复报告中列出的问题，不要做无关改动
 - 确保修复不会引入新的视觉差异
 - 确保代码可编译运行
 
-### Step 3: 写入结果
-修复完成后，将结果写入 .claude/fix-result.json：
+### Step 4: 修复后自检
+修复完成后，在提交结果前做一次自检：
+1. 等待页面热更新生效（等待 3 秒）
+2. 使用 Chrome DevTools MCP 的 navigate_page 刷新页面（type=\"reload\"）
+3. 等待页面加载完成
+4. 使用 take_screenshot 截图保存到 ${FIX_SELFCHECK_SCREENSHOT}
+5. 对比截图和设计稿 ${DESIGN_SCREENSHOT}，检查修复是否生效
+6. 如果发现修复未生效或引入了新问题，继续修复直到自检通过
+
+### Step 5: 写入结果
+修复完成且自检通过后，将结果写入 .claude/fix-result.json：
 - 写入 {\"status\": \"done\"}"
         else
             FIX_PROMPT="你现在处于 figma-impl 的 harness 执行阶段，需要修复一个纯逻辑功能实现中的代码问题。
-独立的代码审查员已经检查了你的实现，发现以下问题：
+独立的代码审查员已经检查了你的实现，并提供了详细的诊断报告。
 
 当前任务: ${NEXT_TASK}
 任务描述: ${TASK_DESCRIPTION}
 Dev Server URL: ${DEV_URL}
 当前重试次数: ${RETRY_COUNT}/${MAX_RETRIES}
 ${SCORES_CONTEXT}
-## 代码审查员发现的问题
-
-${LAST_DIFFERENCES}
-
 ## 执行步骤
 
-### Step 1: 理解问题
+### Step 1: 读取完整诊断上下文
 1. 读取 .claude/figma-tasks.json 获取当前任务信息
 2. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范
-3. 仔细阅读上面列出的每一个问题点
-4. 阅读相关代码，理解问题上下文
+3. **读取审查详细分析报告**: 读取 ${REVIEW_ANALYSIS_FILE}，这是代码审查员写的详细分析，包含：
+   - 每个问题的涉及文件路径和行号
+   - 当前问题代码片段
+   - 具体的修复建议代码
+   - 问题的原因说明
+   - 已达标维度清单（这些维度无需修改，避免引入回归）
 
 ### Step 2: 针对性修复
-针对上述每个问题点逐一修复代码。注意：
-- 只修复上面列出的问题，不要做无关改动
+根据分析报告逐一修复每个问题点：
+- 按分析报告中的「涉及文件」和「修复建议」定位和修改代码
+- 参考报告中的「建议修改为」代码片段
+- 只修复报告中列出的问题，不要做无关改动
+- 特别注意「已达标维度」中的代码，不要修改这些部分以避免回归
 - 确保修复不会引入新的问题
 - 确保代码可编译运行
 - 注意边界条件和错误处理
