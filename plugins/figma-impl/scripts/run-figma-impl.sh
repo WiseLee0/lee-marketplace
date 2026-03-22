@@ -752,6 +752,7 @@ while has_remaining_tasks; do
     DEV_URL=$(jq -r '.devServerUrl // ""' "$CONFIG_FILE")
     VERIFY_THRESHOLD=$(jq -r '.verifyThreshold // 80' "$CONFIG_FILE")
     REVIEW_THRESHOLD=$(jq -r '.reviewThreshold // 80' "$CONFIG_FILE")
+    DIMENSION_THRESHOLD=$(jq -r '.dimensionThreshold // 6' "$CONFIG_FILE")
 
     # 判断任务类型
     IS_DESIGN_TASK=true
@@ -841,7 +842,7 @@ ${COMMON_INIT_STEPS}
 
 当前任务: ${NEXT_TASK}
 Dev Server URL: ${DEV_URL}
-通过阈值: 每项 ≥ 7 分且总分 ≥ ${VERIFY_THRESHOLD}%
+通过阈值: 每项 ≥ ${DIMENSION_THRESHOLD} 分且总分 ≥ ${VERIFY_THRESHOLD}%
 上下文输出目录: ${CONTEXT_DIR}
 
 ## 执行步骤
@@ -943,8 +944,8 @@ Dev Server URL: ${DEV_URL}
 - 各维度权重: layout=2.0, spacing=1.5, colors=1.5, typography=1.0, borders=0.5, shadows=0.5, icons_images=1.0, completeness=2.0（权重总和=10.0）
 - total_score = Σ(维度分数 × 维度权重) / (权重总和 × 10) × 100，四舍五入取整
   示例: layout=8(×2.0=16) + spacing=6(×1.5=9) + colors=9(×1.5=13.5) + typography=7(×1.0=7) + borders=8(×0.5=4) + shadows=10(×0.5=5) + icons_images=5(×1.0=5) + completeness=7(×2.0=14) = 73.5 → total_score = 74
-- passed = true 当且仅当：total_score >= ${VERIFY_THRESHOLD} 且所有维度 >= 7
-- failed_dimensions: 列出所有 < 7 分的维度
+- passed = true 当且仅当：total_score >= ${VERIFY_THRESHOLD} 且所有维度 >= ${DIMENSION_THRESHOLD}
+- failed_dimensions: 列出所有 < ${DIMENSION_THRESHOLD} 分的维度
 - differences: 列出所有具体差异，格式为「维度: 具体描述」
 - 必须将结果写入 .claude/verify-result.json，这是唯一的结果传递方式
 - 必须将详细分析写入 ${VERIFY_ANALYSIS_FILE}，这是修复会话获取完整上下文的关键"
@@ -1000,7 +1001,7 @@ ${COMMON_INIT_STEPS}
 当前任务: ${NEXT_TASK}
 任务描述: ${TASK_DESCRIPTION}
 Dev Server URL: ${DEV_URL}
-通过阈值: 每项 ≥ 7 分且总分 ≥ ${REVIEW_THRESHOLD}%
+通过阈值: 每项 ≥ ${DIMENSION_THRESHOLD} 分且总分 ≥ ${REVIEW_THRESHOLD}%
 上下文输出目录: ${CONTEXT_DIR}
 
 ## 执行步骤
@@ -1090,8 +1091,8 @@ Dev Server URL: ${DEV_URL}
 评分规则：
 - 各维度权重: correctness=2.5, completeness=2.0, error_handling=1.5, code_quality=1.5, type_safety=1.0, integration=1.5（权重总和=10.0）
 - total_score = Σ(维度分数 × 维度权重) / (权重总和 × 10) × 100，四舍五入取整
-- passed = true 当且仅当：total_score >= ${REVIEW_THRESHOLD} 且所有维度 >= 7
-- failed_dimensions: 列出所有 < 7 分的维度
+- passed = true 当且仅当：total_score >= ${REVIEW_THRESHOLD} 且所有维度 >= ${DIMENSION_THRESHOLD}
+- failed_dimensions: 列出所有 < ${DIMENSION_THRESHOLD} 分的维度
 - issues: 列出所有具体问题，格式为「维度: 具体描述」
 - 必须将结果写入 .claude/review-result.json，这是唯一的结果传递方式
 - 必须将详细分析写入 ${REVIEW_ANALYSIS_FILE}，这是修复会话获取完整上下文的关键"
@@ -1227,25 +1228,25 @@ ${LAST_DIFFERENCES}
 
             if $IS_DESIGN_TASK; then
                 # 视觉验证：使用设计稿维度和权重
-                VERIFIED_JSON=$(jq --argjson threshold "$CURRENT_THRESHOLD" '
+                VERIFIED_JSON=$(jq --argjson threshold "$CURRENT_THRESHOLD" --argjson dimThreshold "$DIMENSION_THRESHOLD" '
                   {"layout":2.0,"spacing":1.5,"colors":1.5,"typography":1.0,"borders":0.5,"shadows":0.5,"icons_images":1.0,"completeness":2.0} as $w
                   | 10.0 as $wsum
                   | .scores as $s
                   | ($s | to_entries | map(.value * $w[.key]) | add) as $weighted
                   | (($weighted / ($wsum * 10) * 100) | round) as $total
-                  | ($s | to_entries | map(select(.value < 7)) | map(.key)) as $failed
+                  | ($s | to_entries | map(select(.value < $dimThreshold)) | map(.key)) as $failed
                   | ($total >= $threshold and ($failed | length) == 0) as $passed
                   | { total_score: $total, passed: $passed, failed_dimensions: $failed }
                 ' "$RESULT_FILE")
             else
                 # 代码审查：使用代码维度和权重
-                VERIFIED_JSON=$(jq --argjson threshold "$CURRENT_THRESHOLD" '
+                VERIFIED_JSON=$(jq --argjson threshold "$CURRENT_THRESHOLD" --argjson dimThreshold "$DIMENSION_THRESHOLD" '
                   {"correctness":2.5,"completeness":2.0,"error_handling":1.5,"code_quality":1.5,"type_safety":1.0,"integration":1.5} as $w
                   | 10.0 as $wsum
                   | .scores as $s
                   | ($s | to_entries | map(.value * $w[.key]) | add) as $weighted
                   | (($weighted / ($wsum * 10) * 100) | round) as $total
-                  | ($s | to_entries | map(select(.value < 7)) | map(.key)) as $failed
+                  | ($s | to_entries | map(select(.value < $dimThreshold)) | map(.key)) as $failed
                   | ($total >= $threshold and ($failed | length) == 0) as $passed
                   | { total_score: $total, passed: $passed, failed_dimensions: $failed }
                 ' "$RESULT_FILE")
@@ -1311,8 +1312,8 @@ ${LAST_DIFFERENCES}
 ${LAST_SCORES_JSON}
 
 ⚠️ 防回归要求：
-- 以上评分中 ≥ 7 分的维度是已达标维度，修复时必须保持这些维度不退步
-- 重点修复 < 7 分的维度和下面列出的差异
+- 以上评分中 ≥ ${DIMENSION_THRESHOLD} 分的维度是已达标维度，修复时必须保持这些维度不退步
+- 重点修复 < ${DIMENSION_THRESHOLD} 分的维度和下面列出的差异
 - 如果修复某个问题可能影响已达标维度，请谨慎操作，确保不引入回归
 "
         fi

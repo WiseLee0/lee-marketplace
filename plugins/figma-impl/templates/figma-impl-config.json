@@ -6,5 +6,6 @@
   "screenshotWaitMs": 10000,
   "verifyThreshold": 80,
   "reviewThreshold": 80,
+  "dimensionThreshold": 6,
   "sessionTimeout": 600
 }
