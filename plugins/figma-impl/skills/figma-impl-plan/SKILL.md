@@ -124,9 +124,7 @@ user-invocable: true
   {
     "id": 1,
     "name": "优化后的功能名称",
-    "originalName": "用户原始输入的名称",
     "description": "AI 根据 Figma 设计稿分析后生成的详细描述",
-    "targetPath": "src/components/Example/index.tsx",
     "figmaUrl": "完整URL（纯逻辑任务留空）",
     "figmaFileKey": "xxx",
     "figmaNodeId": "1:2",

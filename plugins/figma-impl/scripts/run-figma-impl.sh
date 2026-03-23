@@ -792,8 +792,11 @@ while has_remaining_tasks; do
         IS_DESIGN_TASK=false
     fi
 
-    # 获取任务描述（纯逻辑任务需要用到）
+    # 获取任务描述和 Figma 信息
     TASK_DESCRIPTION=$(jq -r --arg name "$NEXT_TASK" '[.[] | select(.name == $name)][0].description // ""' "$TASKS_FILE")
+    TASK_FIGMA_URL=$(jq -r --arg name "$NEXT_TASK" '[.[] | select(.name == $name)][0].figmaUrl // ""' "$TASKS_FILE")
+    TASK_FIGMA_FILE_KEY=$(jq -r --arg name "$NEXT_TASK" '[.[] | select(.name == $name)][0].figmaFileKey // ""' "$TASKS_FILE")
+    TASK_FIGMA_NODE_ID=$(jq -r --arg name "$NEXT_TASK" '[.[] | select(.name == $name)][0].figmaNodeId // ""' "$TASKS_FILE")
 
     # ── 共用的环境检查步骤 ──────────────────────────────────
     COMMON_INIT_STEPS="### Step 1: 环境检查与状态恢复
@@ -814,6 +817,10 @@ while has_remaining_tasks; do
 你需要完成代码实现，并做一次快速视觉自检修复明显问题（精确验证由独立会话完成）。
 
 当前任务: ${NEXT_TASK}
+任务描述: ${TASK_DESCRIPTION}
+Figma URL: ${TASK_FIGMA_URL}
+Figma fileKey: ${TASK_FIGMA_FILE_KEY}
+Figma nodeId: ${TASK_FIGMA_NODE_ID}
 Dev Server URL: ${DEV_URL}
 
 ## 执行步骤
@@ -821,8 +828,8 @@ Dev Server URL: ${DEV_URL}
 ${COMMON_INIT_STEPS}
 
 ### Step 3: 获取 Figma 设计上下文
-1. 调用 Figma MCP 的 figma__get_design_context，传入 fileKey 和 nodeId，获取设计上下文和参考代码
-2. 调用 Figma MCP 的 figma__get_screenshot，传入 fileKey 和 nodeId，获取设计稿截图作为对照基准
+1. 调用 Figma MCP 的 figma__get_design_context，传入 fileKey（${TASK_FIGMA_FILE_KEY}）和 nodeId（${TASK_FIGMA_NODE_ID}），获取设计上下文和参考代码
+2. 调用 Figma MCP 的 figma__get_screenshot，传入 fileKey（${TASK_FIGMA_FILE_KEY}）和 nodeId（${TASK_FIGMA_NODE_ID}），获取设计稿截图作为对照基准
 3. 仔细分析设计稿中的布局结构、颜色值、字体、间距、交互状态、组件层级
 4. 查找并读取 Figma 官方 implement-design skill：用 Glob 搜索 ~/.claude/plugins/cache/**/figma/*/skills/implement-design/SKILL.md，如果找到则读取，作为设计稿实现的最佳实践参考
 
@@ -889,6 +896,10 @@ ${COMMON_INIT_STEPS}
 - 文字换行位置可能因容器宽度不同而不同，不应视为差异
 
 当前任务: ${NEXT_TASK}
+任务描述: ${TASK_DESCRIPTION}
+Figma URL: ${TASK_FIGMA_URL}
+Figma fileKey: ${TASK_FIGMA_FILE_KEY}
+Figma nodeId: ${TASK_FIGMA_NODE_ID}
 Dev Server URL: ${DEV_URL}
 通过阈值: 每项 ≥ ${DIMENSION_THRESHOLD} 分且总分 ≥ ${VERIFY_THRESHOLD}%
 上下文输出目录: ${CONTEXT_DIR}
@@ -896,10 +907,9 @@ Dev Server URL: ${DEV_URL}
 ## 执行步骤
 
 ### Step 1: 获取 Figma 设计基准
-1. 读取 .claude/figma-tasks.json 获取当前任务信息（figmaUrl 中的 fileKey 和 nodeId）
-2. 调用 Figma MCP 的 figma__get_design_context，传入 fileKey 和 nodeId，获取设计上下文
-3. **提取设计数值清单**：从 design_context 返回的参考代码中，提取所有明确的 CSS 数值（颜色、间距、字号、圆角等），记录为「设计基准值表」。注意：design_context 返回的是参考代码，不一定包含所有属性——只记录明确给出的值
-4. 调用 Figma MCP 的 figma__get_screenshot，传入 fileKey 和 nodeId，获取设计稿截图
+1. 调用 Figma MCP 的 figma__get_design_context，传入 fileKey（${TASK_FIGMA_FILE_KEY}）和 nodeId（${TASK_FIGMA_NODE_ID}），获取设计上下文
+2. **提取设计数值清单**：从 design_context 返回的参考代码中，提取所有明确的 CSS 数值（颜色、间距、字号、圆角等），记录为「设计基准值表」。注意：design_context 返回的是参考代码，不一定包含所有属性——只记录明确给出的值
+3. 调用 Figma MCP 的 figma__get_screenshot，传入 fileKey（${TASK_FIGMA_FILE_KEY}）和 nodeId（${TASK_FIGMA_NODE_ID}），获取设计稿截图
 5. **保存设计稿截图**：通过 Bash 工具将截图保存到 ${DESIGN_SCREENSHOT}
 
 ### Step 2: 截取实现截图
@@ -1083,9 +1093,8 @@ Dev Server URL: ${DEV_URL}
 ## 执行步骤
 
 ### Step 1: 理解需求
-1. 读取 .claude/figma-tasks.json 获取当前任务信息（name、description）
-2. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范
-3. 理解任务的功能需求和预期行为
+1. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范
+2. 理解任务的功能需求和预期行为（参考上方的任务描述）
 
 ### Step 2: 审查实现代码
 1. 通过 git diff HEAD~1（或 git status 查看变更文件）找到本次实现涉及的所有文件
@@ -1309,9 +1318,8 @@ ${BP_FEEDBACK}
 ## 执行步骤
 
 ### Step 1: 分析错误
-1. 读取 .claude/figma-tasks.json 获取当前任务信息
-2. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范
-3. 分析上面的错误输出，理解每个错误的原因
+1. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范
+2. 分析上面的错误输出，理解每个错误的原因
 
 ### Step 2: 逐一修复
 1. 根据错误信息定位问题文件和行号
@@ -1536,15 +1544,18 @@ ${LAST_SCORES_JSON}
 独立的视觉 QA 审查员已经检查了你的实现，并提供了详细的诊断报告。
 
 当前任务: ${NEXT_TASK}
+任务描述: ${TASK_DESCRIPTION}
+Figma URL: ${TASK_FIGMA_URL}
+Figma fileKey: ${TASK_FIGMA_FILE_KEY}
+Figma nodeId: ${TASK_FIGMA_NODE_ID}
 Dev Server URL: ${DEV_URL}
 当前重试次数: ${RETRY_COUNT}/${MAX_RETRIES}
 ${SCORES_CONTEXT}
 ## 执行步骤
 
 ### Step 1: 读取完整诊断上下文
-1. 读取 .claude/figma-tasks.json 获取当前任务信息
-2. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范
-3. **读取 QA 详细分析报告**: 读取 ${VERIFY_ANALYSIS_FILE}，这是 QA 审查员写的详细分析，包含：
+1. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范
+2. **读取 QA 详细分析报告**: 读取 ${VERIFY_ANALYSIS_FILE}，这是 QA 审查员写的详细分析，包含：
    - 每个差异的设计稿值 vs 实际值
    - 涉及的文件路径和行号
    - 涉及的 CSS 选择器/元素
@@ -1552,7 +1563,7 @@ ${SCORES_CONTEXT}
    - DevTools 采集的实际 CSS 值对照表
 4. **查看设计稿截图**: 读取 ${DESIGN_SCREENSHOT}，了解设计稿的视觉目标
 5. **查看当前实现截图**: 读取 ${IMPL_SCREENSHOT}，了解当前实现的视觉效果
-6. 调用 Figma MCP 的 figma__get_design_context，传入 fileKey 和 nodeId，获取设计上下文中的具体数值
+6. 调用 Figma MCP 的 figma__get_design_context，传入 fileKey（${TASK_FIGMA_FILE_KEY}）和 nodeId（${TASK_FIGMA_NODE_ID}），获取设计上下文中的具体数值
 
 ### Step 2: 使用 DevTools 定位问题元素
 1. 使用 Chrome DevTools MCP 的 navigate_page 导航到目标页面
@@ -1592,9 +1603,8 @@ ${SCORES_CONTEXT}
 ## 执行步骤
 
 ### Step 1: 读取完整诊断上下文
-1. 读取 .claude/figma-tasks.json 获取当前任务信息
-2. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范
-3. **读取审查详细分析报告**: 读取 ${REVIEW_ANALYSIS_FILE}，这是代码审查员写的详细分析，包含：
+1. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范
+2. **读取审查详细分析报告**: 读取 ${REVIEW_ANALYSIS_FILE}，这是代码审查员写的详细分析，包含：
    - 每个问题的涉及文件路径和行号
    - 当前问题代码片段
    - 具体的修复建议代码
