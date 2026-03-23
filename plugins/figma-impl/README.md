@@ -6,9 +6,9 @@ Claude Code 插件，用于从 Figma 设计稿批量实现 React 组件，并通
 
 1. 你提供一组功能列表和对应的 Figma 设计稿 URL
 2. 插件自动创建结构化任务列表，分析任务间的依赖关系
-3. Harness 脚本循环调用 Claude Code，每轮会话实现一个功能
-4. 每次实现都会通过 Chrome DevTools 截图与 Figma 设计稿进行视觉对比验证
-5. 只有完美还原才会通过，否则自动修复并重新验证
+3. Harness 脚本循环调用 Claude Code，每个任务拆分为独立会话（实现 → 验证/审查 → 修复）
+4. UI 任务通过 Chrome DevTools 截图与 Figma 设计稿进行视觉对比验证；纯逻辑任务通过代码审查流程验证
+5. 采用结构化加权评分机制，未达标则自动修复并重新验证，同时防止修复导致分数回归
 
 ## 前置条件
 
@@ -89,7 +89,10 @@ Harness 脚本会：
   "screenshotWaitMs": 10000,
   "verifyThreshold": 80,
   "reviewThreshold": 80,
-  "sessionTimeout": 600
+  "dimensionThreshold": 6,
+  "scoreDropTolerance": 3,
+  "sessionTimeout": 600,
+  "backpressureCommand": ""
 }
 ```
 
@@ -100,9 +103,12 @@ Harness 脚本会：
 | `devServerUrl` | 开发服务器 URL，用于 Chrome 导航 | `""` |
 | `devServerPort` | 开发服务器端口 | `""` |
 | `screenshotWaitMs` | 截图前等待时间（毫秒） | `10000` |
-| `verifyThreshold` | 视觉验证通过的总分阈值（%） | `85` |
+| `verifyThreshold` | 视觉验证通过的总分阈值（%） | `80` |
 | `reviewThreshold` | 代码审查通过的总分阈值（%） | `80` |
+| `dimensionThreshold` | 单个维度评分的最低阈值 | `6` |
+| `scoreDropTolerance` | 修复轮次允许的最大分数下降幅度，超过则回滚 | `3` |
 | `sessionTimeout` | 单个任务最大执行时间（秒） | `600` |
+| `backpressureCommand` | 编译/测试/Lint 校验命令，审查前自动执行 | `""` |
 
 ## 工作原理
 
@@ -113,15 +119,24 @@ Harness 脚本会：
 ```
 run-figma-impl.sh (harness 循环)
   ├── 启动 dev server
-  └── claude 会话 1: 实现任务 A
-       ├── 读取状态文件
-       ├── Figma MCP → 获取设计上下文 + 截图
-       ├── 实现代码
-       ├── Chrome MCP → 设置视口 + 截取实现截图
-       ├── 对比验证 → 通过/失败
-       └── 写入状态文件 + git commit
-  └── claude 会话 2: 实现任务 B
-       └── (全新上下文，从文件读取状态)
+  └── 任务 A
+  │    ├── 会话 1: 实现
+  │    │    ├── 读取状态文件 + 上一轮上下文
+  │    │    ├── Figma MCP → 获取设计上下文 + 截图
+  │    │    ├── 实现代码 + 快速视觉自检
+  │    │    └── 输出实现报告 → impl-result.json
+  │    ├── 会话 2: 验证/审查
+  │    │    ├── UI 任务 → Chrome MCP 截图 + 结构化加权评分
+  │    │    ├── 逻辑任务 → 代码审查评分
+  │    │    ├── backpressure → 编译/测试/Lint 校验
+  │    │    └── 输出验证报告 → verify-result.json
+  │    ├── (未通过) 会话 3: 修复
+  │    │    ├── 读取验证报告，针对性修复
+  │    │    ├── 分数回滚检测 → 防止修复导致退化
+  │    │    └── 循环直到通过或达到 maxRetries
+  │    └── 通过 → git commit
+  └── 任务 B（全新上下文，按依赖顺序）
+  │    └── (失败任务的下游依赖自动跳过)
   └── ...
   └── 关闭 dev server
 ```
@@ -133,6 +148,10 @@ run-figma-impl.sh (harness 循环)
 | `.claude/figma-tasks.json` | 任务列表（状态、依赖关系、重试次数等） |
 | `.claude/figma-progress.md` | 可读的执行日志 |
 | `.claude/figma-impl-config.json` | 配置文件 |
+| `.claude/impl-result.json` | 实现会话输出的报告 |
+| `.claude/verify-result.json` | 验证/审查会话输出的报告 |
+| `.claude/fix-result.json` | 修复会话输出的报告 |
+| `.claude/review-result.json` | 代码审查会话输出的报告 |
 | Git 历史 | 检查点与回滚 |
 
 ### 视觉验证清单

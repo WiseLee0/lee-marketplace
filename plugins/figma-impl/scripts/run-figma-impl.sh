@@ -243,7 +243,7 @@ start_dev_server() {
 
     echo -e "  ${CYAN}启动 dev server: $dev_cmd${NC}"
     # 后台启动 dev server（输出到日志文件，避免 /dev/null 导致某些框架阻塞）
-    eval "$dev_cmd" > "$DEV_SERVER_LOG" 2>&1 &
+    PORT=${dev_port:+$dev_port} eval "$dev_cmd" > "$DEV_SERVER_LOG" 2>&1 &
     DEV_SERVER_PID=$!
 
     # 等待 dev server 启动

@@ -28,9 +28,9 @@ A collection of Claude Code plugins for Figma design-to-code workflows.
 
 1. 你提供一组功能列表和对应的 Figma 设计稿 URL
 2. 插件自动创建结构化任务列表，分析任务间的依赖关系
-3. Harness 脚本循环调用 Claude Code，每轮会话实现一个功能
-4. 每次实现都会通过 Chrome DevTools 截图与 Figma 设计稿进行视觉对比验证
-5. 只有完美还原才会通过，否则自动修复并重新验证
+3. Harness 脚本循环调用 Claude Code，每个任务拆分为独立会话（实现 → 验证/审查 → 修复）
+4. UI 任务通过 Chrome DevTools 截图与 Figma 设计稿进行视觉对比验证；纯逻辑任务通过代码审查流程验证
+5. 采用结构化加权评分机制，未达标则自动修复并重新验证，同时防止修复导致分数回归
 
 **前置条件：**
 
