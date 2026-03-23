@@ -54,6 +54,7 @@ IMPL_SCREENSHOT="$CONTEXT_DIR/impl-screenshot.png"
 VERIFY_ANALYSIS_FILE="$CONTEXT_DIR/verify-analysis.md"
 REVIEW_ANALYSIS_FILE="$CONTEXT_DIR/review-analysis.md"
 FIX_SELFCHECK_SCREENSHOT="$CONTEXT_DIR/fix-selfcheck-screenshot.png"
+BACKPRESSURE_FEEDBACK_FILE="$CLAUDE_DIR/backpressure-feedback.txt"
 
 # ============================================================
 # 中断处理
@@ -392,6 +393,35 @@ has_figma_design() {
     local url
     url=$(get_task_figma_url "$task_name")
     [ -n "$url" ] && [ "$url" != "null" ] && [ "$url" != "" ]
+}
+
+# Backpressure: 运行硬性校验命令（test/typecheck/lint）
+# 返回 0 = 通过, 1 = 失败（错误输出写入 BACKPRESSURE_FEEDBACK_FILE）
+run_backpressure() {
+    local bp_cmd="$1"
+    if [ -z "$bp_cmd" ]; then
+        return 0
+    fi
+
+    echo -e "  ${CYAN}[Backpressure]${NC} 运行硬性校验: ${DIM}${bp_cmd}${NC}"
+
+    local bp_output
+    local bp_exit_code
+    bp_output=$(eval "$bp_cmd" 2>&1) || bp_exit_code=$?
+    bp_exit_code=${bp_exit_code:-0}
+
+    if [ "$bp_exit_code" -ne 0 ]; then
+        echo -e "  ${RED}-> Backpressure 未通过 (exit code: ${bp_exit_code})${NC}"
+        # 保存最后 80 行输出作为反馈
+        echo "$bp_output" | tail -80 > "$BACKPRESSURE_FEEDBACK_FILE"
+        # 终端显示最后 10 行
+        echo "$bp_output" | tail -10 | sed 's/^/    /'
+        return 1
+    fi
+
+    echo -e "  ${GREEN}-> Backpressure 通过${NC}"
+    rm -f "$BACKPRESSURE_FEEDBACK_FILE"
+    return 0
 }
 
 get_next_task_name() {
@@ -754,6 +784,7 @@ while has_remaining_tasks; do
     REVIEW_THRESHOLD=$(jq -r '.reviewThreshold // 80' "$CONFIG_FILE")
     DIMENSION_THRESHOLD=$(jq -r '.dimensionThreshold // 6' "$CONFIG_FILE")
     SCORE_DROP_TOLERANCE=$(jq -r '.scoreDropTolerance // 3' "$CONFIG_FILE")
+    BACKPRESSURE_CMD=$(jq -r '.backpressureCommand // ""' "$CONFIG_FILE")
 
     # 判断任务类型
     IS_DESIGN_TASK=true
@@ -1233,6 +1264,94 @@ Dev Server URL: ${DEV_URL}
 
     while [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; do
         $INTERRUPTED && break
+
+        # ── Backpressure 硬性校验（配置了 backpressureCommand 时执行）──
+        if [ -n "$BACKPRESSURE_CMD" ]; then
+            if ! run_backpressure "$BACKPRESSURE_CMD"; then
+                # Backpressure 未通过：跳过 LLM 审查，直接进入修复
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+                jq --argjson rc "$RETRY_COUNT" \
+                    'map(if .status == "in_progress" then .retryCount = $rc else . end)' \
+                    "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+                echo -e "  ${YELLOW}Backpressure 未通过，跳过${STAGE_LABEL}，直接修复 (retry ${RETRY_COUNT}/${MAX_RETRIES})${NC}"
+
+                if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
+                    LAST_DIFFERENCES="Backpressure 硬性校验未通过（${BACKPRESSURE_CMD}）"
+                    break
+                fi
+
+                # 修复前打 checkpoint
+                git add -A 2>/dev/null
+                git tag -f "figma-impl-checkpoint" 2>/dev/null
+
+                # 读取 backpressure 错误输出
+                BP_FEEDBACK=""
+                if [ -f "$BACKPRESSURE_FEEDBACK_FILE" ]; then
+                    BP_FEEDBACK=$(cat "$BACKPRESSURE_FEEDBACK_FILE")
+                fi
+
+                echo -e "  ${CYAN}[修复阶段]${NC} 启动修复会话（修复 backpressure 错误）..."
+
+                BP_FIX_PROMPT="你现在处于 figma-impl 的 harness 执行阶段，需要修复代码中的编译/测试/Lint 错误。
+Backpressure 硬性校验命令（${BACKPRESSURE_CMD}）执行失败，必须先修复这些错误才能继续。
+
+当前任务: ${NEXT_TASK}
+任务描述: ${TASK_DESCRIPTION}
+当前重试次数: ${RETRY_COUNT}/${MAX_RETRIES}
+
+## Backpressure 错误输出
+
+\`\`\`
+${BP_FEEDBACK}
+\`\`\`
+
+## 执行步骤
+
+### Step 1: 分析错误
+1. 读取 .claude/figma-tasks.json 获取当前任务信息
+2. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范
+3. 分析上面的错误输出，理解每个错误的原因
+
+### Step 2: 逐一修复
+1. 根据错误信息定位问题文件和行号
+2. 修复 TypeScript 类型错误、测试失败等问题
+3. 只修复错误输出中列出的问题，不要做无关改动
+4. 确保修复不会引入新的错误
+
+### Step 3: 本地验证
+修复完成后，在本地运行相同的校验命令确认修复：
+1. 使用 Bash 运行: ${BACKPRESSURE_CMD}
+2. 如果仍有失败，继续修复直到通过
+3. 全部通过后进入下一步
+
+### Step 4: 写入结果
+修复完成且本地验证通过后，将结果写入 .claude/fix-result.json：
+- 写入 {\"status\": \"done\"}
+
+## 注意事项
+- 不要 git commit（由 harness 统一处理）
+- 不要修改 figma-tasks.json 中的 verifyPassed 或 retryCount
+- 必须将结果写入 .claude/fix-result.json"
+
+                rm -f "$FIX_RESULT_FILE"
+                run_claude_session "$BP_FIX_PROMPT"
+                FIX_ELAPSED=$RCS_ELAPSED
+                TOTAL_VERIFY_ELAPSED=$((TOTAL_VERIFY_ELAPSED + FIX_ELAPSED))
+
+                $INTERRUPTED && break
+
+                if $RCS_TIMED_OUT; then
+                    echo -e "${RED}  -> 修复超时${NC}"
+                elif [ -f "$FIX_RESULT_FILE" ] && [ "$(jq -r '.status // ""' "$FIX_RESULT_FILE" 2>/dev/null)" = "done" ]; then
+                    echo -e "${GREEN}  -> Backpressure 修复完成${NC}"
+                else
+                    echo -e "${YELLOW}  -> 修复阶段未正常结束${NC}"
+                fi
+
+                continue  # 回到循环顶部，再次运行 backpressure 校验
+            fi
+        fi
 
         if [ "$RETRY_COUNT" -eq 0 ]; then
             echo -e "  ${CYAN}[${STAGE_LABEL}阶段]${NC} 启动独立${STAGE_LABEL}会话..."

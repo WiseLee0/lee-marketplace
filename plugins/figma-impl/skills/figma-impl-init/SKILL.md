@@ -48,7 +48,10 @@ chmod +x ./run-figma-impl.sh
   "screenshotWaitMs": 10000,
   "verifyThreshold": 80,
   "reviewThreshold": 80,
-  "sessionTimeout": 600
+  "dimensionThreshold": 6,
+  "scoreDropTolerance": 3,
+  "sessionTimeout": 600,
+  "backpressureCommand": ""
 }
 ```
 
@@ -61,6 +64,7 @@ chmod +x ./run-figma-impl.sh
 3. **devServerPort** — 端口号（如 `3000`）
 4. **maxRetries** — 失败重试上限（默认 5）
 5. **sessionTimeout** — 单个任务的最大执行时间，单位秒（默认 600）
+6. **backpressureCommand** — 硬性校验命令（可选）。每次 LLM 审查前先运行此命令，不通过则跳过审查直接修复。典型配置如 `npm run typecheck && npm run lint`、`npm test && npm run typecheck`。留空则不启用。
 
 ### 4. 输出结果
 

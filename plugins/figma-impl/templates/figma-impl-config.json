@@ -8,5 +8,6 @@
   "reviewThreshold": 80,
   "dimensionThreshold": 6,
   "scoreDropTolerance": 3,
-  "sessionTimeout": 600
+  "sessionTimeout": 600,
+  "backpressureCommand": ""
 }
