@@ -14,15 +14,14 @@ user-invocable: true
 
 ### 0. 清理历史文件
 
-删除之前的任务和进度文件，确保从干净状态开始：
+删除之前的任务和运行产物，确保从干净状态开始：
 
 ```bash
-rm -f .claude/figma-tasks.json
-rm -f .claude/figma-tasks.json.tmp
-rm -f .claude/figma-progress.md
+rm -rf .claude/figma-impl
+rm -f ./run-figma-impl.sh
 ```
 
-如果这些文件存在，先告知用户"检测到历史任务文件，已清理"。
+如果 `.claude/figma-impl` 目录存在，先告知用户"检测到历史任务文件，已清理"。
 
 ### 1. 复制 harness 脚本
 
@@ -37,7 +36,11 @@ chmod +x ./run-figma-impl.sh
 
 ### 2. 创建配置文件
 
-如果 `.claude/figma-impl-config.json` 不存在，创建默认配置：
+创建 `.claude/figma-impl/` 目录，并在其中创建 `config.json`（如果不存在）：
+
+```bash
+mkdir -p .claude/figma-impl
+```
 
 ```json
 {
@@ -66,16 +69,16 @@ chmod +x ./run-figma-impl.sh
 5. **sessionTimeout** — 单个任务的最大执行时间，单位秒（默认 600）
 6. **backpressureCommand** — 硬性校验命令（可选）。每次 LLM 审查前先运行此命令，不通过则跳过审查直接修复。典型配置如 `npm run typecheck && npm run lint`、`npm test && npm run typecheck`。留空则不启用。
 
-### 4. 输出结果
+### 4. 输出结果并进入任务规划
+
+输出初始化完成信息：
 
 ```
 figma-impl 环境初始化完成！
 
 已创建:
   ./run-figma-impl.sh              — harness 执行脚本
-  .claude/figma-impl-config.json   — 配置文件
-
-下一步:
-  1. 在 Claude Code 中运行 /figma-impl-plan 创建任务列表
-  2. 运行 ./run-figma-impl.sh 开始自动执行
+  .claude/figma-impl/config.json   — 配置文件
 ```
+
+然后直接调用 `/figma-impl-plan` 进入任务规划阶段，让用户输入功能列表和 Figma 设计稿 URL。

@@ -14,11 +14,11 @@ user-invocable: true
 
 ## 阶段判断
 
-1. 检查项目根目录是否存在 `.claude/figma-tasks.json`
+1. 检查项目根目录是否存在 `.claude/figma-impl/tasks.json`
 2. **如果不存在** → 进入初始化阶段
 3. **如果已存在** → 检查用户意图：
    - 如果用户在当前消息中提供了新的功能列表（包含 "功能N:" 或 Figma URL 格式的输入），说明用户想创建新任务 → 询问用户："检测到已有任务文件，是否清除旧任务并重新初始化？"
-     - 用户确认 → 删除 `.claude/figma-tasks.json` 和 `.claude/figma-progress.md`，进入初始化阶段
+     - 用户确认 → 删除 `.claude/figma-impl/tasks.json` 和 `.claude/figma-impl/progress.md`，进入初始化阶段
      - 用户拒绝 → 进入**合并模式**：将新功能追加到现有任务列表中（ID 从当前最大 ID + 1 开始），保留已有任务的状态不变，完成后提示用户运行 `./run-figma-impl.sh` 执行
    - 如果用户没有提供新的功能列表 → 显示当前任务状态概览，提示用户运行 `./run-figma-impl.sh` 继续执行
 
@@ -98,7 +98,7 @@ user-invocable: true
 
 ### 3. 读取配置
 
-读取 `.claude/figma-impl-config.json`，如果不存在则创建默认配置：
+读取 `.claude/figma-impl/config.json`，如果不存在则创建默认配置：
 
 ```json
 {
@@ -117,7 +117,7 @@ user-invocable: true
 
 ### 4. 创建任务文件
 
-创建 `.claude/figma-tasks.json`：
+创建 `.claude/figma-impl/tasks.json`：
 
 ```json
 [
@@ -146,7 +146,7 @@ user-invocable: true
 
 ### 5. 创建进度文件
 
-创建 `.claude/figma-progress.md`：
+创建 `.claude/figma-impl/progress.md`：
 
 ```markdown
 # Figma 实现进度

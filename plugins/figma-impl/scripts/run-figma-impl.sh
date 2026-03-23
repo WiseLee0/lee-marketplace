@@ -38,23 +38,24 @@ while [ -L "$SCRIPT_PATH" ]; do
 done
 PROJECT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 CLAUDE_DIR="$PROJECT_DIR/.claude"
-TASKS_FILE="$CLAUDE_DIR/figma-tasks.json"
-PROGRESS_FILE="$CLAUDE_DIR/figma-progress.md"
-CONFIG_FILE="$CLAUDE_DIR/figma-impl-config.json"
-IMPL_RESULT_FILE="$CLAUDE_DIR/impl-result.json"
-VERIFY_RESULT_FILE="$CLAUDE_DIR/verify-result.json"
-FIX_RESULT_FILE="$CLAUDE_DIR/fix-result.json"
-REVIEW_RESULT_FILE="$CLAUDE_DIR/review-result.json"
-DEV_SERVER_LOG="$CLAUDE_DIR/dev-server.log"
+FIGMA_IMPL_DIR="$CLAUDE_DIR/figma-impl"
+TASKS_FILE="$FIGMA_IMPL_DIR/tasks.json"
+PROGRESS_FILE="$FIGMA_IMPL_DIR/progress.md"
+CONFIG_FILE="$FIGMA_IMPL_DIR/config.json"
+IMPL_RESULT_FILE="$FIGMA_IMPL_DIR/impl-result.json"
+VERIFY_RESULT_FILE="$FIGMA_IMPL_DIR/verify-result.json"
+FIX_RESULT_FILE="$FIGMA_IMPL_DIR/fix-result.json"
+REVIEW_RESULT_FILE="$FIGMA_IMPL_DIR/review-result.json"
+DEV_SERVER_LOG="$FIGMA_IMPL_DIR/dev-server.log"
 
 # 跨会话上下文文件
-CONTEXT_DIR="$CLAUDE_DIR/verify-context"
+CONTEXT_DIR="$FIGMA_IMPL_DIR/context"
 DESIGN_SCREENSHOT="$CONTEXT_DIR/design-screenshot.png"
 IMPL_SCREENSHOT="$CONTEXT_DIR/impl-screenshot.png"
 VERIFY_ANALYSIS_FILE="$CONTEXT_DIR/verify-analysis.md"
 REVIEW_ANALYSIS_FILE="$CONTEXT_DIR/review-analysis.md"
 FIX_SELFCHECK_SCREENSHOT="$CONTEXT_DIR/fix-selfcheck-screenshot.png"
-BACKPRESSURE_FEEDBACK_FILE="$CLAUDE_DIR/backpressure-feedback.txt"
+BACKPRESSURE_FEEDBACK_FILE="$FIGMA_IMPL_DIR/backpressure-feedback.txt"
 
 # ============================================================
 # 中断处理
@@ -138,7 +139,7 @@ check_prerequisites() {
     fi
 
     if [ ! -f "$TASKS_FILE" ]; then
-        echo -e "${RED}  [x] 未找到任务文件 .claude/figma-tasks.json${NC}"
+        echo -e "${RED}  [x] 未找到任务文件 .claude/figma-impl/tasks.json${NC}"
         echo -e "      请先在 Claude Code 中运行 ${CYAN}/figma-impl-plan${NC} 创建任务列表"
         errors=$((errors + 1))
     elif ! validate_json "$TASKS_FILE"; then
@@ -146,7 +147,7 @@ check_prerequisites() {
     fi
 
     if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${RED}  [x] 未找到配置文件 .claude/figma-impl-config.json${NC}"
+        echo -e "${RED}  [x] 未找到配置文件 .claude/figma-impl/config.json${NC}"
         echo -e "      请先在 Claude Code 中运行 ${CYAN}/figma-impl-plan${NC} 初始化项目"
         errors=$((errors + 1))
     elif ! validate_json "$CONFIG_FILE"; then
@@ -201,7 +202,7 @@ check_prerequisites() {
 
         if [ "$has_cycle" = "true" ]; then
             echo -e "${RED}  [x] 检测到循环依赖！${NC}"
-            echo -e "      请检查 .claude/figma-tasks.json 中的 dependsOn 字段"
+            echo -e "      请检查 .claude/figma-impl/tasks.json 中的 dependsOn 字段"
             echo -e "      修复循环依赖后重新运行"
             echo ""
             exit 1
@@ -215,7 +216,7 @@ check_prerequisites() {
         dev_url=$(jq -r '.devServerUrl // ""' "$CONFIG_FILE")
         if [ -z "$dev_cmd" ] || [ -z "$dev_url" ]; then
             echo -e "${YELLOW}  [!] 配置不完整：devServerCommand 或 devServerUrl 为空${NC}"
-            echo -e "      请编辑 ${CYAN}.claude/figma-impl-config.json${NC} 填写开发服务器信息"
+            echo -e "      请编辑 ${CYAN}.claude/figma-impl/config.json${NC} 填写开发服务器信息"
             echo ""
             exit 1
         fi
@@ -281,9 +282,9 @@ start_dev_server() {
                 echo -e "  可能的原因："
                 echo -e "    1. 项目编译时间过长，可尝试增大超时时间"
                 echo -e "    2. 端口 $dev_port 与实际启动端口不一致"
-                echo -e "       请检查 ${CYAN}.claude/figma-impl-config.json${NC} 中的 devServerPort 配置"
+                echo -e "       请检查 ${CYAN}.claude/figma-impl/config.json${NC} 中的 devServerPort 配置"
                 echo -e "    3. dev server 启动后卡住，请手动运行 ${CYAN}$dev_cmd${NC} 排查"
-                echo -e "    4. 可在 .claude/figma-impl-config.json 中设置 ${CYAN}devServerStartTimeout${NC} 增大超时（默认 120s）"
+                echo -e "    4. 可在 .claude/figma-impl/config.json 中设置 ${CYAN}devServerStartTimeout${NC} 增大超时（默认 120s）"
                 echo ""
                 # 清理已启动的进程
                 kill "$DEV_SERVER_PID" 2>/dev/null || true
@@ -306,7 +307,7 @@ start_dev_server() {
             echo -e "  可能的原因："
             echo -e "    1. 命令不正确: ${CYAN}$dev_cmd${NC}"
             echo -e "    2. 依赖未安装，请先运行 ${CYAN}npm install${NC} 或 ${CYAN}pnpm install${NC}"
-            echo -e "  建议在 ${CYAN}.claude/figma-impl-config.json${NC} 中配置 devServerPort 以获得更精确的启动检测"
+            echo -e "  建议在 ${CYAN}.claude/figma-impl/config.json${NC} 中配置 devServerPort 以获得更精确的启动检测"
             echo ""
             DEV_SERVER_PID=""
             exit 1
@@ -739,7 +740,7 @@ while has_remaining_tasks; do
 
     # 每轮开始前校验 JSON 完整性
     if ! validate_json "$TASKS_FILE"; then
-        echo -e "${RED}  任务文件损坏，中止执行。请检查 .claude/figma-tasks.json${NC}"
+        echo -e "${RED}  任务文件损坏，中止执行。请检查 .claude/figma-impl/tasks.json${NC}"
         break
     fi
 
@@ -800,15 +801,15 @@ while has_remaining_tasks; do
 
     # ── 共用的环境检查步骤 ──────────────────────────────────
     COMMON_INIT_STEPS="### Step 1: 环境检查与状态恢复
-1. 读取 .claude/figma-impl-config.json 获取配置
-2. 读取 .claude/figma-tasks.json 获取任务列表
-3. 读取 .claude/figma-progress.md 获取历史上下文
+1. 读取 .claude/figma-impl/config.json 获取配置
+2. 读取 .claude/figma-impl/tasks.json 获取任务列表
+3. 读取 .claude/figma-impl/progress.md 获取历史上下文
 4. 读取项目根目录的 CLAUDE.md（如果存在），了解项目规范、技术栈约定和编码风格要求
 5. 读取 .claude/rules/figma-design-system.md 和 .claude/figma-design-rules.md（如果存在），了解设计系统规则
 6. git log --oneline -20 了解最近变更
 
 ### Step 2: 选择任务
-找到名为「${NEXT_TASK}」的任务，将其 status 更新为 in_progress，立即写入 figma-tasks.json。
+找到名为「${NEXT_TASK}」的任务，将其 status 更新为 in_progress，立即写入 tasks.json。
 【原子写入】写 JSON 时先写入 .tmp 文件再 mv 覆盖，防止中断导致损坏。"
 
     if $IS_DESIGN_TASK; then
@@ -851,7 +852,7 @@ ${COMMON_INIT_STEPS}
 ⚠️ 注意：这里只修「一眼能看出来的问题」，不需要采集 CSS 值、不需要逐维度打分、不需要写报告。精确验证由后续独立验证会话完成。
 
 ### Step 6: 写入结果
-确认代码已编写完成、自检无明显问题后，将结果写入 .claude/impl-result.json：
+确认代码已编写完成、自检无明显问题后，将结果写入 .claude/figma-impl/impl-result.json：
 - 实现完成：写入 {\"status\": \"done\"}
 - 无可执行任务：写入 {\"status\": \"no_task\"}
 
@@ -859,7 +860,7 @@ ${COMMON_INIT_STEPS}
 - 不修改任务定义：只能修改 status 字段（设为 in_progress），不要改 name、figmaUrl 等定义字段
 - 自检只修明显问题，不要做完整的逐维度评分验证，不要修改 verifyPassed 或 retryCount
 - 不要 git commit（由 harness 在验证通过后统一处理）
-- 必须将结果写入 .claude/impl-result.json，harness 通过该文件判断会话结果"
+- 必须将结果写入 .claude/figma-impl/impl-result.json，harness 通过该文件判断会话结果"
 
         # ── Prompt B: 视觉验证 ──────────────────────────────────
         VERIFY_PROMPT="你是一个严格的视觉 QA 审查员。你的工作是对比 Figma 设计稿和实际实现，找出所有差异。
@@ -963,7 +964,7 @@ Dev Server URL: ${DEV_URL}
 ### Step 5: 写入验证结果和详细分析
 
 #### 5a. 写入评分结果
-将验证结果写入 .claude/verify-result.json（harness 通过该文件读取评分），格式如下：
+将验证结果写入 .claude/figma-impl/verify-result.json（harness 通过该文件读取评分），格式如下：
 
 {
   \"passed\": false,
@@ -1033,7 +1034,7 @@ Dev Server URL: ${DEV_URL}
 - passed = true 当且仅当：total_score >= ${VERIFY_THRESHOLD} 且所有维度 >= ${DIMENSION_THRESHOLD}
 - failed_dimensions: 列出所有 < ${DIMENSION_THRESHOLD} 分的维度
 - differences: 列出所有具体差异，格式为「维度: 具体描述 [来源: design_context | 截图对比 | 截图推测]」
-- 必须将结果写入 .claude/verify-result.json，这是唯一的结果传递方式
+- 必须将结果写入 .claude/figma-impl/verify-result.json，这是唯一的结果传递方式
 - 必须将详细分析写入 ${VERIFY_ANALYSIS_FILE}，这是修复会话获取完整上下文的关键"
 
     else
@@ -1064,7 +1065,7 @@ ${COMMON_INIT_STEPS}
 7. 如果涉及状态管理，确保状态更新逻辑正确
 
 ### Step 5: 写入结果
-确认代码已编写完成、可编译后，将结果写入 .claude/impl-result.json：
+确认代码已编写完成、可编译后，将结果写入 .claude/figma-impl/impl-result.json：
 - 实现完成：写入 {\"status\": \"done\"}
 - 无可执行任务：写入 {\"status\": \"no_task\"}
 
@@ -1072,7 +1073,7 @@ ${COMMON_INIT_STEPS}
 - 不修改任务定义：只能修改 status 字段（设为 in_progress），不要改 name、description 等定义字段
 - 不要修改 verifyPassed 或 retryCount
 - 不要 git commit（由 harness 在审查通过后统一处理）
-- 必须将结果写入 .claude/impl-result.json，harness 通过该文件判断会话结果"
+- 必须将结果写入 .claude/figma-impl/impl-result.json，harness 通过该文件判断会话结果"
 
         # ── Prompt B': 代码审查 ──────────────────────────────────
         VERIFY_PROMPT="你是一个严格的代码审查员。你的工作是审查一个纯逻辑功能的代码实现质量。
@@ -1116,7 +1117,7 @@ Dev Server URL: ${DEV_URL}
 ### Step 4: 写入结果和详细分析
 
 #### 4a. 写入评分结果
-将审查结果写入 .claude/review-result.json（harness 通过该文件读取评分），格式如下：
+将审查结果写入 .claude/figma-impl/review-result.json（harness 通过该文件读取评分），格式如下：
 
 {
   \"passed\": false,
@@ -1179,7 +1180,7 @@ Dev Server URL: ${DEV_URL}
 - passed = true 当且仅当：total_score >= ${REVIEW_THRESHOLD} 且所有维度 >= ${DIMENSION_THRESHOLD}
 - failed_dimensions: 列出所有 < ${DIMENSION_THRESHOLD} 分的维度
 - issues: 列出所有具体问题，格式为「维度: 具体描述」
-- 必须将结果写入 .claude/review-result.json，这是唯一的结果传递方式
+- 必须将结果写入 .claude/figma-impl/review-result.json，这是唯一的结果传递方式
 - 必须将详细分析写入 ${REVIEW_ANALYSIS_FILE}，这是修复会话获取完整上下文的关键"
 
     fi
@@ -1334,13 +1335,13 @@ ${BP_FEEDBACK}
 3. 全部通过后进入下一步
 
 ### Step 4: 写入结果
-修复完成且本地验证通过后，将结果写入 .claude/fix-result.json：
+修复完成且本地验证通过后，将结果写入 .claude/figma-impl/fix-result.json：
 - 写入 {\"status\": \"done\"}
 
 ## 注意事项
 - 不要 git commit（由 harness 统一处理）
-- 不要修改 figma-tasks.json 中的 verifyPassed 或 retryCount
-- 必须将结果写入 .claude/fix-result.json"
+- 不要修改 tasks.json 中的 verifyPassed 或 retryCount
+- 必须将结果写入 .claude/figma-impl/fix-result.json"
 
                 rm -f "$FIX_RESULT_FILE"
                 run_claude_session "$BP_FIX_PROMPT"
@@ -1589,7 +1590,7 @@ ${SCORES_CONTEXT}
 6. 如果发现修复未生效或引入了新问题，继续修复直到自检通过
 
 ### Step 5: 写入结果
-修复完成且自检通过后，将结果写入 .claude/fix-result.json：
+修复完成且自检通过后，将结果写入 .claude/figma-impl/fix-result.json：
 - 写入 {\"status\": \"done\"}"
         else
             FIX_PROMPT="你现在处于 figma-impl 的 harness 执行阶段，需要修复一个纯逻辑功能实现中的代码问题。
@@ -1622,7 +1623,7 @@ ${SCORES_CONTEXT}
 - 注意边界条件和错误处理
 
 ### Step 3: 写入结果
-修复完成后，将结果写入 .claude/fix-result.json：
+修复完成后，将结果写入 .claude/figma-impl/fix-result.json：
 - 写入 {\"status\": \"done\"}"
         fi
 
@@ -1662,7 +1663,7 @@ ${SCORES_CONTEXT}
         jq 'map(if .status == "in_progress" then .status = "done" | .verifyPassed = true | .completedAt = (now | strftime("%Y-%m-%dT%H:%M:%SZ")) else . end)' \
             "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
 
-        # git commit（提交所有变更，含 figma-tasks.json 的状态更新）
+        # git commit（提交所有变更，含 tasks.json 的状态更新）
         if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
             if $IS_DESIGN_TASK; then
                 git add -A && git commit -m "feat: 实现 ${NEXT_TASK} - Figma设计稿还原" 2>/dev/null || true
